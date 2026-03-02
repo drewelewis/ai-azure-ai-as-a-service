@@ -1,0 +1,26 @@
+# Example Terraform variables file
+# Copy to terraform.tfvars and fill in your values
+
+resource_group_name  = "rg-foundry-marketing"
+location             = "eastus"
+hub_name             = "hub-ai-central"
+project_name         = "proj-marketing-chatbot"
+team_name            = "marketing"
+storage_account_name = "stfoundrymktg001"
+key_vault_name       = "kv-foundry-mktg"
+search_service_name  = "search-marketing-rag"
+search_sku           = "standard"
+
+# Add Entra ID Object IDs for your developers
+developer_object_ids = [
+  "12345678-1234-1234-1234-123456789012",  # alice@contoso.com
+  "87654321-4321-4321-4321-210987654321"   # bob@contoso.com
+]
+
+tags = {
+  environment = "production"
+  project     = "marketing-ai"
+  costcenter  = "marketing"
+  team        = "marketing-dev"
+  managedby   = "terraform"
+}

@@ -1,0 +1,21 @@
+# Example Terraform variables file
+# Copy to terraform.tfvars and fill in your values
+
+resource_group_name      = "rg-ai-gateway-prod"
+location                 = "eastus"
+apim_name                = "apim-ai-gateway-prod"
+apim_sku                 = "Standard_1"
+publisher_name           = "Contoso IT"
+publisher_email          = "it-admin@contoso.com"
+azure_openai_endpoint    = "https://contoso-openai.openai.azure.com/"
+azure_openai_key         = "your-openai-key-here"
+
+tags = {
+  environment = "production"
+  project     = "ai-gateway"
+  costcenter  = "IT"
+  managedby   = "terraform"
+}
+
+ai_standard_token_quota  = 100000   # 100K tokens/hour for sandbox
+ai_premium_token_quota   = 1000000  # 1M tokens/hour for production

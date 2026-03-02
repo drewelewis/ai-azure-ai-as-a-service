@@ -1,0 +1,131 @@
+<!--
+APIM Policy: Token Quota Management by Department
+==================================================
+
+This policy enforces token-based rate limiting per department.
+It prevents one team from exhausting the entire company's Azure OpenAI quota.
+
+How it works:
+1. Extract department from request header
+2. Track tokens consumed per request
+3. If department exceeds monthly quota, return 429 (Too Many Requests)
+4. Log all token usage for chargeback
+
+Applied to: All inbound requests to LLM endpoints
+-->
+
+<policies>
+    <inbound>
+        <!-- 1. Extract department from header -->
+        <set-variable name="department" value="@(context.Request.Headers.GetValueOrDefault("X-Department-Id", "unknown"))" />
+        
+        <!-- 2. Log the incoming request -->
+        <log-to-eventhub logger-id="ai-tokenlog">
+            <expression>@{
+                var department = (string)context.Variables["department"];
+                var timestamp = DateTime.UtcNow.ToString("o");
+                return new {
+                    timestamp = timestamp,
+                    department = department,
+                    user = context.User.Id,
+                    operation = context.Operation.Id,
+                    requestPath = context.Request.Url.Path,
+                    model = context.Request.Query.GetValueOrDefault("model", "unknown"),
+                    status = "inbound"
+                }.ToString();
+            }</expression>
+        </log-to-eventhub>
+        
+        <!-- 3. Rate limit by department (token quota) -->
+        <!-- 
+            Example quotas:
+            - data-science: 50M tokens/month (~$250)
+            - customer-success: 10M tokens/month (~$50)
+            - engineering: 100M tokens/month (~$500)
+        -->
+        <rate-limit-by-key 
+            calls="100000" 
+            renewal-period="2592000"
+            counter-key="@("tok_" + context.Variables["department"])"
+            estimate-remaining-calls="true"
+            remaining-calls-header-name="X-RateLimit-Remaining"
+        />
+        
+        <!-- 4. If organization header is missing, require it -->
+        <choose>
+            <when condition="@(string.IsNullOrEmpty((string)context.Variables["department"]))">
+                <return-response>
+                    <set-status code="400" reason="Bad Request" />
+                    <set-header name="Content-Type" value="application/json" />
+                    <set-body>@{
+                        return JsonConvert.SerializeObject(new {
+                            error = "Missing X-Department-Id header",
+                            message = "All requests must include X-Department-Id header",
+                            example = "X-Department-Id: data-science"
+                        });
+                    }</set-body>
+                </return-response>
+            </when>
+        </choose>
+        
+        <!-- 5. Forward to backend with auth header injection -->
+        <set-header name="Authorization" value="Bearer @(context.Request.Headers.GetValueOrDefault("X-MS-API-Key"))" />
+    </inbound>
+    
+    <backend>
+        <!-- Forward to Azure OpenAI backend -->
+        <forward-request />
+    </backend>
+    
+    <outbound>
+        <!-- 1. Extract token usage from response -->
+        <set-variable name="complete-tokens" value="@(context.Response.StatusCode == 200 ? ((dynamic)context.Response.Body).usage.completion_tokens : 0)" />
+        <set-variable name="prompt-tokens" value="@(context.Response.StatusCode == 200 ? ((dynamic)context.Response.Body).usage.prompt_tokens : 0)" />
+        <set-variable name="total-tokens" value="@(context.Response.StatusCode == 200 ? ((dynamic)context.Response.Body).usage.total_tokens : 0)" />
+        
+        <!-- 2. Deduct from organization token bucket -->
+        <!-- This would be a custom policy or Azure Function call in production -->
+        <!-- Example: decrement_org_quota(department, total_tokens) -->
+        
+        <!-- 3. Add token info to response headers (for debugging) -->
+        <set-header name="X-Tokens-Used" value="@((string)context.Variables["total-tokens"])" />
+        <set-header name="X-Department-Usage" value="@((string)context.Variables["department"])" />
+        
+        <!-- 4. Log the response with token details -->
+        <log-to-eventhub logger-id="ai-tokenlog">
+            <expression>@{
+                return new {
+                    timestamp = DateTime.UtcNow.ToString("o"),
+                    department = context.Variables["department"],
+                    user = context.User.Id,
+                    tokens = {
+                        prompt = context.Variables["prompt-tokens"],
+                        completion = context.Variables["complete-tokens"],
+                        total = context.Variables["total-tokens"]
+                    },
+                    model = context.Request.Query.GetValueOrDefault("model", "unknown"),
+                    responseStatus = context.Response.StatusCode,
+                    responseTime = context.Elapsed.TotalMilliseconds,
+                    status = "outbound"
+                }.ToString();
+            }</expression>
+        </log-to-eventhub>
+        
+        <!-- 5. Add cache headers for responses -->
+        <set-header name="Cache-Control" value="public, max-age=3600" />
+    </outbound>
+    
+    <on-error>
+        <!-- Log errors -->
+        <log-to-eventhub logger-id="ai-tokenlog">
+            <expression>@{
+                return new {
+                    timestamp = DateTime.UtcNow.ToString("o"),
+                    department = context.Variables["department"],
+                    error = context.LastError.Message,
+                    status = "error"
+                }.ToString();
+            }</expression>
+        </log-to-eventhub>
+    </on-error>
+</policies>

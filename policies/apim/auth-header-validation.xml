@@ -1,0 +1,101 @@
+<!--
+APIM Policy: Authentication & Developer Identification
+========================================================
+
+Every request must include department/app identifier and be authenticated.
+This allows us to:
+- Track usage by department
+- Enforce quota
+- Audit access
+- Chargeback
+
+Header Requirements:
+- X-Department-Id: Which department is calling (e.g., "data-science", "customer-success")
+- Authorization: Bearer <access-token> (from Azure AD/Entra)
+OR
+- Ocp-Apim-Subscription-Key: <subscription-key> (for API key auth)
+
+Applied to: All endpoints
+-->
+
+<policies>
+    <inbound>
+        <!-- 1. Check for required headers -->
+        <choose>
+            <when condition="@(string.IsNullOrEmpty(context.Request.Headers.GetValueOrDefault("X-Department-Id")))">
+                <return-response>
+                    <set-status code="400" reason="Bad Request" />
+                    <set-header name="Content-Type" value="application/json" />
+                    <set-body>@{
+                        return JsonConvert.SerializeObject(new {
+                            error = "Missing X-Department-Id",
+                            message = "Request must include X-Department-Id header",
+                            allowed_values = new[] { "data-science", "customer-success", "engineering", "finance" },
+                            example_curl = "curl -H 'X-Department-Id: data-science' https://your-apim.azure-api.net/ai/..."
+                        });
+                    }</set-body>
+                </return-response>
+            </when>
+        </choose>
+        
+        <!-- 2. Validate subscription key (if using key auth) -->
+        <validate-jwt header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized. Invalid or expired token.">
+            <openid-config url="https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration" />
+            <audiences>
+                <audience>api://your-azure-tenant/ai-platform</audience>
+            </audiences>
+            <issuers>
+                <issuer>https://sts.windows.net/YOUR-TENANT-ID/</issuer>
+            </issuers>
+        </validate-jwt>
+        
+        <!-- 3. Store department for logging -->
+        <set-variable name="department" value="@(context.Request.Headers["X-Department-Id"])" />
+        <set-variable name="user-id" value="@(context.User.Id)" />
+        
+        <!-- 4. Extract app/developer info from JWT claims if available -->
+        <set-variable name="app-id" value="@(context.User.Id)" />
+        
+        <!-- 5. Log authentication info -->
+        <trace inspect-response="false">
+            <message>@{
+                return string.Format("Auth: department={0}, user={1}, app={2}", 
+                    context.Variables["department"],
+                    context.Variables["user-id"],
+                    context.Variables["app-id"]
+                );
+            }</message>
+        </trace>
+        
+        <!-- 6. Allow request to proceed -->
+    </inbound>
+    
+    <backend>
+        <forward-request />
+    </backend>
+    
+    <outbound>
+        <!-- Add auth info to response headers for debugging -->
+        <set-header name="X-Authenticated-User" value="@((string)context.Variables["user-id"])" />
+        <set-header name="X-Department" value="@((string)context.Variables["department"])" />
+    </outbound>
+    
+    <on-error>
+        <!-- Return friendly error for auth failures -->
+        <choose>
+            <when condition="@(context.Response.StatusCode == 401)">
+                <set-header name="Content-Type" value="application/json" />
+                <set-body>@{
+                    return JsonConvert.SerializeObject(new {
+                        error = "Unauthorized",
+                        message = "Your token expired or is invalid",
+                        next_steps = new[] {
+                            "1. Get a new token: az account get-access-token --resource https://cognitiveservices.azure.com",
+                            "2. Include it in your request: -H 'Authorization: Bearer <token>'"
+                        }
+                    });
+                }</set-body>
+            </when>
+        </choose>
+    </on-error>
+</policies>
