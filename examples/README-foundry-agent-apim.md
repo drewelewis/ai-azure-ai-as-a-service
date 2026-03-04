@@ -259,6 +259,24 @@ az network private-endpoint create \
   --connection-name foundry-connection
 ```
 
+## ⚠️ CRITICAL: SDK Endpoint Verification
+
+**IMPORTANT:** This architecture assumes `AIProjectClient` honors the `endpoint` parameter for ALL operations. 
+However, **this is unverified**. If the SDK constructs Azure-specific URLs internally, some operations might 
+bypass APIM.
+
+**📖 Read this FIRST:** [SDK-ENDPOINT-VERIFICATION.md](../docs/SDK-ENDPOINT-VERIFICATION.md)
+
+**Before deploying to production:**
+1. Run traffic capture test: `tests/test-sdk-endpoint-routing.py`
+2. Use `mitmproxy` to verify ALL requests go through APIM
+3. Enable network-level enforcement: `publicNetworkAccess: Disabled`
+
+**Defense-in-Depth Strategy:**  
+✅ SDK endpoint parameter (application layer)  
+✅ + Private Link only (network layer)  
+✅ + RBAC restrictions (identity layer)
+
 ## 🎓 Key Concepts
 
 ### Why APIM Instead of Direct Access?

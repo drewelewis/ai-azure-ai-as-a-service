@@ -215,10 +215,18 @@ class FoundryAgentManager:
         self.credential = DefaultAzureCredential()
         
         # Create AI Project client pointing to APIM gateway
+        # ⚠️ CRITICAL ASSUMPTION: We assume the SDK honors this endpoint for ALL operations
+        # (create_agent, create_thread, create_run, list_messages, etc.)
+        # 
+        # This is UNVERIFIED. If the SDK constructs Azure-specific URLs internally,
+        # some operations might bypass APIM, circumventing quotas/policies.
+        #
+        # Mitigation: Use publicNetworkAccess: Disabled on Foundry + Private Link
+        # See: docs/SDK-ENDPOINT-VERIFICATION.md
         self.client = AIProjectClient(
             credential=self.credential,
             project_id=config.project_id,
-            endpoint=config.apim_endpoint  # This ensures ALL traffic goes through APIM
+            endpoint=config.apim_endpoint  # All traffic SHOULD go through APIM
         )
         
         print(f"✅ Connected to project: {config.project_id}")
