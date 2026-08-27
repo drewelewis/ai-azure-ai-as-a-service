@@ -20,7 +20,7 @@
   TEST SUITES (run in parallel)
   ==============================
   Suite 1  [Bronze] — 3 threads, 5s think, 120s, max_tokens=1  → ~30 RPM, ~60 TPM   (Bronze cap: 60 RPM / 500 TPM)
-  Suite 2  [Silver] — 3 threads, 5s think, 120s, max_tokens=1  → ~30 RPM, ~60 TPM   (Silver cap: 300 RPM / 5000 TPM)
+  Suite 2  [Silver] — 3 threads, 5s think, 120s, max_tokens=1  → ~30 RPM, ~60 TPM   (Silver cap: 120 RPM / 1000 TPM)
 
   Expected outcome:
     All requests return HTTP 200 via primary Foundry (East US).
@@ -37,8 +37,8 @@
   ============================================
     APIM_HOSTNAME  = apim-contoso-<suffix>.azure-api.net   (internal APIM hostname)
     API_VERSION    = 2024-10-21
-    BRONZE_KEY     = <bronze-test subscription key>
-    SILVER_KEY     = <silver-test subscription key>
+    BRONZE_KEY     = <consumer-customer-service subscription key>
+    SILVER_KEY     = <consumer-account-opening subscription key>
 
   Additional uploaded files:
     system.properties — trustStore=NONE (SSL bypass for self-signed APIM cert)
@@ -265,7 +265,7 @@ if (region.contains("secondary")) {
 
       <!-- ================================================================= -->
       <!-- Suite 2: Silver — 3 threads, 5s think, 120s                       -->
-      <!-- ~30 RPM, ~60 TPM — well within Silver 300 RPM / 5000 TPM caps     -->
+      <!-- ~30 RPM, ~60 TPM — well within Silver 120 RPM / 1000 TPM caps     -->
       <!-- ================================================================= -->
       <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup"
                    testname="[Silver] Smoke — gpt-4o-mini" enabled="true">

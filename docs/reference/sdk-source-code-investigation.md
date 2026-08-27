@@ -259,7 +259,7 @@ client = AIProjectClient(
 3. Is there official documentation showing custom endpoints with AIProjectClient?
 
 **Use case:** Enterprise architecture requiring all AI traffic through APIM gateway 
-for token quotas, semantic caching, and audit logging.
+for token quotas, failover routing, and audit logging.
 
 **Critical:** If any operations bypass the endpoint parameter, our governance controls fail.
 ```

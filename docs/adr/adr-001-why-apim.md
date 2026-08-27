@@ -20,8 +20,7 @@ When deploying Azure AI (LLMs, Agents) to internal developers, IT managers face 
 
 APIM sits between developers and models, providing:
 - Rate limiting & quota enforcement per team/app
-- Semantic caching (reduce token costs by ~40%)
-- Auto-failover across regions
+- Circuit-state routing across regions
 - Centralized audit logging
 - Managed Identity auth (no key distribution)
 - Request/response transformation
@@ -30,29 +29,28 @@ APIM sits between developers and models, providing:
 
 ### ❌ Direct Azure OpenAI Endpoints
 **Pros:** Simple, no additional layer
-**Cons:** No cost controls, no caching, keys scattered across teams, audit trails fragmented
+**Cons:** No centralized cost controls, keys scattered across teams, audit trails fragmented
 
 ### ❌ Custom Gateway (Python/Node.js)
 **Pros:** Maximum flexibility
 **Cons:** High maintenance, duplicate functionality, another service to operate
 
 ### ✅ Azure API Management (Chosen)
-**Pros:** Enterprise SLA, built-in policies, deep Azure integration, semantic caching, connection pooling
+**Pros:** Enterprise SLA, built-in policies, deep Azure integration, managed-identity backends
 **Cons:** Additional cost (~$100-500/mo depending on tier)
 
 ## Consequences
 
 ### Positive 🟢
 
-1. **Cost Visibility** - Track every token at APIM layer; set quotas per department. Quota operates at two layers: (a) APIM enforces a per-subscription-key **TPM** (Tokens Per Minute) and **RPM** (Requests Per Minute) cap for each tier (Bronze 500 TPM, Silver 5,000 TPM, Gold 5,500 TPM); (b) Foundry enforces an aggregate deployment capacity shared across all callers. APIM limits are always the effective constraint by design.
-   - **IT Manager** owns tier governance: approves tier upgrades and manages LOB access requests via ServiceNow.
+1. **Cost Visibility** - Track tokens at the APIM layer and set quotas per subscription. APIM enforces Bronze 500 TPM / 60 RPM, Silver 1,000 TPM / 120 RPM, and Gold 2,000 TPM / 240 RPM; Foundry separately enforces aggregate deployment capacity.
+    - **IT Manager** owns tier governance and approves LOB access or tier changes.
    - **Platform Engineer** owns infrastructure capacity: adjusts Foundry deployment `capacity` in Bicep (`azd provision`) and submits quota increase requests to Microsoft when platform-wide capacity is insufficient.
-   - Developers never interact with Microsoft directly about quota — all escalation paths go through ServiceNow. See [quota-management.md](../playbooks/quota-management.md).
+    - Developers escalate quota needs to the platform team. See [quota-management.md](../playbooks/quota-management.md).
 2. **Resilience** - Auto-failover on rate limits without app code changes
 3. **Security** - Managed Identity replaces scattered API keys
 4. **Compliance** - Audit trail of every request at the gateway layer
-5. **Performance** - Semantic caching reduces token consumption for repeated queries
-6. **Flexibility** - Swap backend models without changing app code
+5. **Flexibility** - Swap backend models without changing app code
 
 ### Negative 🔴
 
@@ -65,20 +63,17 @@ APIM sits between developers and models, providing:
 
 1. Deploy APIM in Premium tier (required for VNet injection and multi-region support)
 2. Create three products: `/ai/inference`, `/ai/agents`, `/ai/completions`
-3. Configure rate limiting policies (tokens **per minute** per team — Bronze: 500 TPM / 60 RPM, Silver: 5,000 TPM / 300 RPM, Gold: 5,500 TPM / 330 RPM)
-4. Set up semantic caching for model endpoints
-5. Enable Application Insights integration
-6. Configure failover backends for multi-region support
+3. Configure rate limiting policies (Bronze: 500 TPM / 60 RPM, Silver: 1,000 TPM / 120 RPM, Gold: 2,000 TPM / 240 RPM)
+4. Enable Application Insights integration
+5. Configure primary and secondary Foundry backends for circuit-state routing
 
 ## Cost Estimate
 
 | Item | Cost/Month |
 |------|-----------|
 | APIM Premium (2 units × 2 regions) | ~$4,000 |
-| Log Analytics (395-day retention) | ~$200 |
+| Log Analytics (90-day retention) | ~$100 |
 | **Total** | **~$4,200** |
-
-*Offset by: semantic caching saving ~30-40% of token costs, eliminating waste from uncontrolled usage*
 
 ## How Developers Experience This
 
@@ -93,24 +88,22 @@ client = AzureOpenAI(
 
 ✅ **With APIM (This Design):**
 ```python
-from azure.ai.projects import AIProjectClient
-client = AIProjectClient(
-    credential=DefaultAzureCredential(),  # Your corporate identity
-    endpoint="https://my-org-ai.azure-api.net"  # Single gateway
+from openai import OpenAI
+client = OpenAI(
+    api_key=os.environ["APIM_SUBSCRIPTION_KEY"],
+    base_url="https://my-org-ai.example.com/openai/v1"
 )
 ```
 
-Developers use their **corporate identity** instead of managing keys.
+Developers receive an application-specific APIM subscription key; Foundry credentials are never distributed.
 
 ## Related Decisions
 
 - [ADR-002: Foundry Integration Pattern](adr-002-foundry-integration.md)
-- [ADR-003: ServiceNow Provisioning Workflow](adr-003-servicenow-workflow.md)
 
 ## References
 
 - [AI Gateway in Azure API Management - Microsoft Learn](https://learn.microsoft.com/azure/api-management/api-management-features#api-gateway)
-- [Semantic Caching in APIM](https://learn.microsoft.com/)
 
 ---
 

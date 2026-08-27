@@ -12,14 +12,16 @@ targetScope = 'resourceGroup'
 param location string
 param prefix string
 param environment string
+param keyVaultName string
+param vnetResourceId string
+param privateEndpointSubnetId string
 param tags object = {}
 
-@description('Object ID (User or Group) to grant Key Vault Administrator — so you can add secrets/certs after provisioning. Leave blank to skip.')
-param adminObjectId string = ''
+@description('Object ID of the deploying principal to grant read access to the generated Key Vault certificate. Leave blank to skip.')
+param certificateReaderObjectId string = ''
 
 // ---------------------------------------------------------------------------
 // Log Analytics Workspace
-// PCI DSS Req 10: Centralised audit log retention (minimum 12 months)
 // ---------------------------------------------------------------------------
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
@@ -30,7 +32,7 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
     sku: {
       name: 'PerGB2018'
     }
-    retentionInDays: 395  // PCI DSS Req 10.5.1: 13 months (395 days); matches README and architecture docs
+    retentionInDays: 90
     features: {
       enableLogAccessUsingOnlyResourcePermissions: true
     }
@@ -39,16 +41,12 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
 
 // ---------------------------------------------------------------------------
 // Key Vault
-// PCI DSS Req 3.7 / 8.6: Protect encryption keys; no static credentials
-//
-// Name: kv-{prefix}-{6-char stable hash} — globally unique, idempotent.
+// Name is supplied by main.bicep using the shared global naming suffix.
 // Standard SKU is sufficient for dev; upgrade to Premium for HSM in production.
 // ---------------------------------------------------------------------------
 
-var kvName = 'kv-${prefix}-${take(uniqueString(resourceGroup().id), 6)}'
-
 resource keyVault 'Microsoft.KeyVault/vaults@2023-02-01' = {
-  name: kvName
+  name: keyVaultName
   location: location
   tags: tags
   properties: {
@@ -60,28 +58,84 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-02-01' = {
     enableRbacAuthorization: true     // Use RBAC rather than access policies
     enableSoftDelete: true
     softDeleteRetentionInDays: 7
-    enablePurgeProtection: true       // Required for PCI DSS Req 3.7
-    publicNetworkAccess: 'Enabled'    // Needed so ARM can manage secrets at provision time
+    enablePurgeProtection: true
+    publicNetworkAccess: 'Disabled'
     networkAcls: {
       bypass: 'AzureServices'
-      defaultAction: 'Allow'
+      defaultAction: 'Deny'
     }
   }
 }
 
-@description('Set to true to assign Key Vault Administrator to adminObjectId. Requires resource-group-scoped role assignment permission.')
+resource keyVaultPrivateDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' = {
+  name: 'privatelink.vaultcore.azure.net'
+  location: 'global'
+  tags: tags
+}
+
+resource keyVaultPrivateDnsZoneVnetLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
+  parent: keyVaultPrivateDnsZone
+  name: 'link-${prefix}-keyvault'
+  location: 'global'
+  tags: tags
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: vnetResourceId
+    }
+  }
+}
+
+resource keyVaultPrivateEndpoint 'Microsoft.Network/privateEndpoints@2023-05-01' = {
+  name: 'pe-${keyVaultName}'
+  location: location
+  tags: tags
+  properties: {
+    subnet: {
+      id: privateEndpointSubnetId
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'key-vault'
+        properties: {
+          privateLinkServiceId: keyVault.id
+          groupIds: [
+            'vault'
+          ]
+        }
+      }
+    ]
+  }
+}
+
+resource keyVaultPrivateEndpointDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-05-01' = {
+  parent: keyVaultPrivateEndpoint
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'key-vault'
+        properties: {
+          privateDnsZoneId: keyVaultPrivateDnsZone.id
+        }
+      }
+    ]
+  }
+}
+
+@description('Set to true to assign Key Vault Certificate User to certificateReaderObjectId. Requires resource-group-scoped role assignment permission.')
 param deployRbac bool = false
 
-// Key Vault Administrator — lets the deploying user upload the SSL cert and secrets
-// after the deployment completes. Skipped if adminObjectId is not provided.
-var kvAdminRoleId = '00482a5a-887f-4fb3-b363-3b7fe8e74483'
+// Key Vault Certificate User allows the deploying principal to verify and export
+// the generated certificate without granting certificate-management permissions.
+var kvCertificateUserRoleId = 'db79e9a7-68ee-4b58-9aeb-b90e7c24fcba'
 
-resource kvAdminRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployRbac && !empty(adminObjectId)) {
+resource kvCertificateReaderRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployRbac && !empty(certificateReaderObjectId)) {
   scope: keyVault
-  name: guid(keyVault.id, adminObjectId, kvAdminRoleId)
+  name: guid(keyVault.id, certificateReaderObjectId, kvCertificateUserRoleId)
   properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', kvAdminRoleId)
-    principalId: adminObjectId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', kvCertificateUserRoleId)
+    principalId: certificateReaderObjectId
     principalType: 'User'
   }
 }
@@ -93,15 +147,3 @@ resource kvAdminRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (
 output logAnalyticsWorkspaceId string = logAnalytics.id
 output keyVaultName string = keyVault.name
 output keyVaultUri string = keyVault.properties.vaultUri
-
-// NOTE: The SSL certificate for App Gateway is NOT auto-generated here.
-// ARM's Microsoft.KeyVault/vaults/certificates resource requires the deploying
-// principal to already have Key Vault data-plane RBAC, which in turn requires
-// roleAssignments/write — a circular permission dependency on restricted accounts.
-//
-// To add App Gateway WAF (recommended for PCI DSS):
-//   1. Run: scripts/create-appgw-cert.ps1 -KeyVaultName <name> -CertName appgw-ssl-cert
-//      (or: az keyvault certificate create --vault-name <kv> --name appgw-ssl-cert --policy @cert-policy.json)
-//   2. Copy the secret URI output (e.g. https://kv-contoso-hvrukk.vault.azure.net/secrets/appgw-ssl-cert)
-//   3. Run: azd env set AZURE_SSL_CERT_KV_SECRET_ID <secret-uri>
-//   4. Run: azd provision

@@ -8,10 +8,10 @@ A practical guide showing how developers interact with the managed Azure AI plat
 
 ### What You'll Do
 
-1. **Request access** in ServiceNow
+1. **Request access** from the platform team
    - Form: "AI Platform Access Request"
    - Fields: Your name, team, use case, expected token usage
-     > **What to put for "expected token usage":** Estimate based on your use case. A short chat app with ~10 users making 20 requests/day ≈ Bronze tier (500 TPM). A production app with multiple users running document summaries ≈ Silver (5,000 TPM). Not sure? Start with Bronze — you can increase it later via ServiceNow without re-onboarding.
+    > **Expected token usage:** Estimate based on your use case. A short chat app with ~10 users making 20 requests/day fits Bronze; a production document-summary workload may need Silver. Start with Bronze when uncertain; the platform team can review a later tier change.
    - Approval: Usually within 24 hours
 
 2. **Receive credentials** via email:
@@ -402,7 +402,7 @@ for batch in chunks(prompts, 10):
 ```
 Your subscription key hit its tier's Tokens Per Minute (TPM) or Requests Per Minute (RPM) cap.
 Check the Retry-After header in the response — wait that many seconds, then retry.
-Longer fix: request a tier upgrade via ServiceNow, or reduce max_tokens in your requests.
+Longer fix: request a reviewed tier upgrade, or reduce `max_tokens` in your requests.
 ```
 
 **Issue: "Rate limited (429)"**
@@ -411,7 +411,7 @@ Same as above. APIM does NOT automatically retry on your behalf — the 429 is r
 client. You must implement exponential back-off with jitter in your code:
   1. Read the Retry-After header value (seconds to wait)
   2. Wait at least that long before retrying (add random jitter to avoid thundering herd)
-  3. If 429s persist after back-off, request a quota increase via ServiceNow
+    3. If 429s persist after back-off, request a quota review from the platform team
   4. Consider using a smaller/cheaper model (e.g. gpt-4o-mini instead of gpt-4o) to stay within Bronze
 ```
 
@@ -454,7 +454,6 @@ client = AIProjectClient(
 ## Resource Links
 
 - **Getting Started:** [Developer Quick Start](../developer-quickstart.md)
-- **Code Examples:** [Python](../examples/python/), [C#](../examples/csharp/)
 - **Troubleshooting:** [#ai-platform Slack channel](slack://channel/)
 - **Architecture:** [Architecture Decision Records](../adr/)
 - **SDK Endpoint Reference:** [SDK Endpoint FAQ](reference/sdk-endpoint-questions.md) · [Endpoint Verification](reference/sdk-endpoint-verification.md)

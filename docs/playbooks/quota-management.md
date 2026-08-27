@@ -45,7 +45,6 @@ Quota in this platform operates at **two independent layers** that must be kept 
 |---|---|---|---|
 | **1. Foundry deployment capacity** | Azure CognitiveServices | `infrastructure/bicep/foundry-hub-project.bicep` | Per deployment, per region, per Azure subscription |
 | **2a. APIM product token limit** | APIM `azure-openai-token-limit` policy | `infrastructure/bicep/apim-gateway.bicep` (product policies) | Per APIM subscription key — actual token count |
-| **2b. APIM department call limit** | APIM `rate-limit-by-key` policy | `policies/apim/token-quota-by-department.xml` | Per `X-Department-Id` header — counts HTTP requests, not tokens |
 
 **The relationship:**
 
@@ -64,7 +63,7 @@ Model
 
 APIM limits should always be the effective constraint. If the sum of all APIM product limits can exceed the Foundry deployment capacity, 429s will pass through to callers from Foundry — bypassing APIM's rate-limit accounting entirely, and without the `Retry-After` header APIM would normally set.
 
-> **Capacity Sizing Rule:** The Foundry deployment `capacity` (Layer 1) must always be greater than or equal to the maximum number of *simultaneously active* APIM subscription keys multiplied by their per-key TPM limit. Concretely: if you have 10 Silver keys (5,000 TPM each) that could all fire at once, your Foundry deployment needs at least 50,000 TPM of capacity, or APIM will shed load to Foundry before it sheds it at the gateway — breaking the per-LOB accounting model. When adding new APIM products or approving new LOB subscriptions, always verify Layer 1 capacity can absorb the worst-case combined load.
+> **Capacity Sizing Rule:** Foundry deployment capacity must cover the expected concurrent load across APIM subscriptions. For example, 10 simultaneously active Silver keys at the 1,000 TPM limit represent up to 10,000 TPM of requested capacity. Size the mirrored Foundry deployments and test failover behavior before onboarding that concurrency.
 
 ---
 
@@ -150,7 +149,7 @@ Set these timeouts in your SDK client configuration. The default timeout in most
 | Secondary | West US | `gpt-4o-mini` (gpt-4o 2024-11-20) | Standard | 30 | **30,000 TPM** |
 | Secondary | West US | `phi-4` (Phi-4 v2) | GlobalStandard | 1 | **1,000 TPM** |
 
-> **Why is primary `capacity=1`?** This is intentionally low to trigger the APIM circuit-breaker failover during load tests. Raise to `5` or higher for production (`5` = 5,000 TPM). See [`policies/apim/circuit-breaker-multi-region.xml`](../../policies/apim/circuit-breaker-multi-region.xml).
+> **Why is primary `capacity=1`?** This is intentionally low to trigger the inline APIM failover policy during load tests. Raise it for production through `infrastructure/model-portfolio.json`.
 
 In Bicep, `capacity` = thousands of TPM. `capacity: 5` = 5,000 TPM.  
 RPM is derived automatically (ratio varies by model — see [TPM→RPM Ratios](#tpmrpm-ratios)).
@@ -159,19 +158,11 @@ RPM is derived automatically (ratio varies by model — see [TPM→RPM Ratios](#
 
 | Product | Models available | TPM limit | RPM limit |
 |---|---|---|---|
-| Bronze (`ai-bronze`) | gpt-4o-mini, Phi-4 | 500 | 60 |
-| Silver (`ai-silver`) | + gpt-4o, Llama-3-70b, Agents API | 5,000 | 300 |
-| Gold (`ai-gold`) | All models incl. o1 | 5,500 | 330 |
+| Bronze (`bronze`) | gpt-4o-mini, Phi-4 | 500 | 60 |
+| Silver (`silver`) | + gpt-4o, Llama-3-70b, Agents API | 5,000 | 300 |
+| Gold (`gold`) | All models incl. o1 | 5,500 | 330 |
 
 APIM enforces product-level token limits via the `azure-openai-token-limit` policy embedded in each product policy in `apim-gateway.bicep`, keyed on `context.Subscription.Id`. This counts actual prompt + completion tokens and returns a 429 when the per-minute budget is exhausted.
-
-#### Department-level secondary limit (`token-quota-by-department.xml`) — call-count based
-
-A supplementary policy in `policies/apim/token-quota-by-department.xml` applies a secondary limit keyed on the `X-Department-Id` request header. **Important:** this policy uses `rate-limit-by-key` which counts **HTTP requests (calls)**, not tokens. It is currently configured at 100,000 calls over a 30-day rolling window — a coarse safety net to prevent any single department from monopolising gateway capacity.
-
-> **Known gap:** `rate-limit-by-key` is not token-aware — a single large 8K-token request and a single 10-token request count equally. For true per-department token enforcement, this policy should be upgraded to `azure-openai-token-limit` keyed on `X-Department-Id`. See the `azure-openai-token-limit` policy reference in the [Reference](#reference) section.
-
-> **Deployment note:** `token-quota-by-department.xml` is **not currently wired into any Bicep resource** — it exists as a reference/design file. Editing it and running `azd provision` has **no effect** on the deployed APIM instance. To deploy it, it must be referenced from a Bicep `Microsoft.ApiManagement/service/apis/policies` resource. See [Adjusting APIM Product Limits](#adjusting-apim-product-limits-iac-only) for the integration pattern.
 
 ---
 
@@ -215,12 +206,12 @@ This platform uses **Standard** deployments for all current Foundry resources. T
 | **Multi-region failover** | You manage it — APIM circuit-breaker policy routes to West US secondary on 429/5xx | Azure manages it automatically — no circuit-breaker policy needed |
 | **Quota pool** | Regional — East US and West US have separate quota allocations that you manage independently | Single global pool — no region-to-region allocation split |
 | **Data residency** | Guaranteed — data does not leave the declared region | Not guaranteed — requests may be served from any Azure region |
-| **PCI DSS / data sovereignty** | Compatible — deterministic in-region processing | Requires compliance review before adoption — data residency not guaranteed |
+| **Data sovereignty** | Deterministic in-region processing | Requires review before adoption because data may be processed in any Azure region |
 | **Regional capacity competition** | Competes with other Azure customers in East US for Standard capacity | Spread globally — regional capacity exhaustion less likely to affect you |
 
-**Why this platform chose Standard:** The circuit-breaker pattern in [`policies/apim/circuit-breaker-multi-region.xml`](../../policies/apim/circuit-breaker-multi-region.xml) is already implemented, and the PCI DSS audit logging requirements in [`policies/apim/pci-dss-audit-logging.xml`](../../policies/apim/pci-dss-audit-logging.xml) benefit from deterministic in-region processing. GlobalStandard would eliminate the need for the West US secondary Foundry account — but requires a full compliance review to confirm data-residency acceptability before any migration.
+**Why this platform chose Standard:** The inline APIM policy provides explicit regional failover, and Standard preserves deterministic regional processing. GlobalStandard would eliminate the need for the secondary Foundry account but requires a data-residency review.
 
-### DataZoneStandard and PCI DSS
+### DataZoneStandard and Geographic Boundaries
 
 If your compliance requirements mandate that data does not leave a defined geographic zone but you want more resilience than a single-region Standard deployment:
 
@@ -290,7 +281,7 @@ Tier 3  ← what you're allowed to allocate (ceiling)
   │
   ├─ gpt-4o-mini East US: 5,000,000 TPM  ← your current allocation (can be less than tier max)
   │     └─ Foundry deployment capacity: 30,000 TPM  ← actual Layer 1 enforcement (Bicep)
-  │           └─ APIM Silver product: 5,000 TPM  ← Layer 2 per-LOB enforcement
+  │           └─ APIM Silver product: 1,000 TPM  ← Layer 2 per-subscription enforcement
   │
   └─ gpt-4.1 East US: [not yet allocated]  ← tier permits this model, but no deployment exists yet
 ```
@@ -321,7 +312,7 @@ Auto-upgrades operate silently in the background. What this means in practice:
 | **What changes** | Your subscription moves to the next higher tier. All default model allocations increase to the new tier's values. |
 | **What does not change** | Existing `capacity` values in your Bicep files. A tier upgrade does not push changes to your deployed resources — you still need to update Bicep and run `azd provision` to consume the new headroom. |
 | **Timing** | Not publicly disclosed. Do not plan releases or capacity changes around the expectation of an auto-upgrade arriving on a specific date. |
-| **Notification** | No Azure portal notification or Event Grid event is emitted when your tier changes. Check via the API (below). |
+| **Notification** | No automatic notification is emitted when your tier changes. Check via the API below. |
 
 ### Auto-Upgrade vs Manual Request — When to Use Which
 
@@ -449,7 +440,7 @@ print(json.dumps(r.json(), indent=2))
 
 ### Log Analytics — APIM token consumption by subscription (KQL)
 
-> **Prerequisite:** The `BackendResponseBody` column in `ApiManagementGatewayLogs` is only populated when APIM diagnostic settings have response body logging enabled. This is disabled by default (PCI DSS Req 3.3 — avoid logging sensitive data). If body logging is off, `TokensConsumed` will be `null` for every row.
+> **Prerequisite:** The `BackendResponseBody` column in `ApiManagementGatewayLogs` is only populated when APIM diagnostic settings have response body logging enabled. Body logging is disabled by default to avoid collecting prompt and response content. If body logging is off, `TokensConsumed` will be `null` for every row.
 >
 > For reliable token tracking **without** enabling body logging, add the [`azure-openai-emit-token-metric`](https://learn.microsoft.com/en-us/azure/api-management/azure-openai-emit-token-metric-policy) policy to `apim-gateway.bicep` — it writes token counts directly to Application Insights custom metrics without capturing the response body.
 
@@ -484,7 +475,7 @@ See also: [`scripts/check-foundry-capacity.ps1`](../../scripts/check-foundry-cap
 
 When the combined throughput needs of all APIM products exceed what the Foundry deployment can sustain, request a quota increase from Microsoft.
 
-> **Ownership reminder:** This is a **Platform Engineer** responsibility. Developers and IT Managers should not contact Microsoft directly — they escalate via ServiceNow.
+> **Ownership reminder:** This is a **Platform Engineer** responsibility. Developers and IT Managers should send utilization evidence to the platform team rather than contacting Microsoft directly.
 
 ### RBAC Required Before Requesting
 
@@ -598,23 +589,6 @@ Example with a monthly budget in addition to per-minute rate limit:
     token-quota-period="Monthly"
     remaining-quota-tokens-header-name="X-Remaining-Monthly-Tokens"
     estimate-prompt-tokens="true" />
-```
-
-### 2. Per-department secondary limit in `token-quota-by-department.xml`
-
-The `X-Department-Id` header enables a secondary layer of enforcement independent of the APIM subscription key. This policy uses `rate-limit-by-key` (HTTP request count), **not** `azure-openai-token-limit`. The current limit is 100,000 requests per 30-day window.
-
-> **Deployment requirement:** This file is not currently wired into any Bicep resource. Editing the XML alone and running `azd provision` will **not** update the deployed APIM instance. To apply it, integrate it into `apim-gateway.bicep` first:
-
-```bicep
-resource deptQuotaApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2023-05-01-preview' = {
-  parent: openaiInferenceApi
-  name: 'policy'
-  properties: {
-    format: 'rawxml'
-    value: loadTextContent('../../policies/apim/token-quota-by-department.xml')
-  }
-}
 ```
 
 > **Multi-region note:** APIM tracks token counters **per gateway node** independently, not aggregated across the entire Premium multi-region instance. If you have APIM units in East US and West US, each unit maintains its own counter. A caller could consume up to 2× the configured `tokens-per-minute` by load-balancing across both units. Account for this in your limit values.
@@ -827,23 +801,14 @@ All RBAC assignments must be defined in [`infrastructure/bicep/foundry-apim-rbac
 
 ---
 
-## ServiceNow Quota Increase Workflow
+## Quota Change Workflow
 
-For LOBs that need a quota increase (higher APIM product tier or a new monthly budget), the request flows through ServiceNow governance:
+For LOBs that need a quota increase or higher APIM product tier:
 
-1. LOB submits request using `QuotaManager.request_quota_increase()` in [`automation/servicenow/quota_increase_workflow.py`](../../automation/servicenow/quota_increase_workflow.py).
-2. Record created in `u_ai_quota_requests` with urgency routing:
-
-   | Monthly cost increase | Urgency | Approver |
-   |---|---|---|
-   | > $1,000 | High | VP |
-   | > $100 | Medium | Manager |
-   | ≤ $100 | Low | Auto-approved |
-
-3. On approval, ServiceNow calls the outbound REST Message to the Azure Function App.
-4. Function App updates the APIM subscription limit **via the APIM Management API** — or, for permanent limit changes, creates a Bicep PR for platform team review.
-
-For ServiceNow setup prerequisites, see [`automation/servicenow/setup/setup-guide.md`](../../automation/servicenow/setup/setup-guide.md).
+1. Provide recent 429 evidence, expected TPM/RPM, model, region, and cost impact.
+2. The platform team checks APIM tier limits and Foundry quota headroom.
+3. Update the model portfolio, deployment capacity, or APIM product policy in Bicep.
+4. Review the change and run `azd provision` to reconcile the environment.
 
 ---
 
@@ -863,10 +828,6 @@ APIM Gateway
 Foundry (CognitiveServices)
   └─ Azure Monitor          ← deployment-level utilisation, PTU Utilization V2,
                               capacity headroom per region
-
-Managed Grafana
-  └─ Pre-built dashboards   ← token usage by LOB, latency distribution, failover
-                              frequency (see observability/grafana/)
 ```
 
 ### Key Metrics to Watch
@@ -880,7 +841,7 @@ Managed Grafana
 | PTU Utilization V2 | Azure Monitor (Cognitive Services resource) | PTU deployment utilisation — applies to PTU deployments only | > 80% sustained for 10 min |
 | Quota headroom (`currentValue / limit`) | `Microsoft.CognitiveServices/locations/usages` REST API | Available vs. allocated quota — proactive capacity check | < 20% remaining (review weekly) |
 
-> **Why `BackendResponseBody` token counts are null:** APIM diagnostic settings have response body logging disabled for PCI DSS Req 3.3 (avoid logging sensitive data in transit). `BackendResponseBody.usage.total_tokens` will be `null` for every row in `ApiManagementGatewayLogs`. For reliable token tracking without body logging, the [`azure-openai-emit-token-metric`](https://learn.microsoft.com/en-us/azure/api-management/azure-openai-emit-token-metric-policy) policy writes token counts directly to Application Insights custom metrics without capturing the response body. Confirm it is present in `apim-gateway.bicep`.
+> **Why `BackendResponseBody` token counts are null:** APIM diagnostic settings have response body logging disabled to minimize collection of prompt and response content. `BackendResponseBody.usage.total_tokens` will be `null` for every row in `ApiManagementGatewayLogs`. For reliable token tracking without body logging, the [`azure-openai-emit-token-metric`](https://learn.microsoft.com/en-us/azure/api-management/azure-openai-emit-token-metric-policy) policy writes token counts directly to Application Insights custom metrics without capturing the response body. Confirm it is present in `apim-gateway.bicep`.
 
 ### KQL Queries for Operational Monitoring
 
@@ -932,13 +893,13 @@ ApiManagementGatewayLogs
 
 ### Per-Product Alert Strategy
 
-A generic 429-count alert does not distinguish between a Bronze subscriber legitimately hitting their 500-TPM ceiling (expected, by design) and a Gold subscriber at their 5,500-TPM ceiling (may indicate a real capacity problem). Alert at the product level with thresholds relative to each product's limit:
+A generic 429-count alert does not distinguish between subscriptions at different tier limits. Alert at the product level with thresholds relative to each configured limit:
 
 | Product | TPM limit | Alert at 90% | Interpretation |
 |---|---|---|---|
-| Bronze (`ai-bronze`) | 500 TPM | 450 TPM sustained | Expected at scale — Bronze is sized for limited use. Review if all Bronze keys are simultaneously at threshold. |
-| Silver (`ai-silver`) | 5,000 TPM | 4,500 TPM sustained | Investigate per-LOB growth. Approaching Gold-tier volume — may need upgrade or quota increase. |
-| Gold (`ai-gold`) | 5,500 TPM | 4,950 TPM sustained | **Requires immediate Layer 1 check.** Gold product limit is very close to the East US primary Foundry deployment capacity (currently 1K TPM for demo; raise before production). |
+| Bronze (`bronze`) | 500 TPM | 450 TPM sustained | Expected at scale — Bronze is sized for limited use. Review if all Bronze keys are simultaneously at threshold. |
+| Silver (`silver`) | 1,000 TPM | 900 TPM sustained | Investigate sustained growth and whether the workload needs Gold. |
+| Gold (`gold`) | 2,000 TPM | 1,800 TPM sustained | Check Foundry capacity and expected concurrency before raising the product limit. |
 
 ### Deploying Alert Rules via Bicep
 
@@ -976,16 +937,16 @@ resource foundry429Alert 'Microsoft.Insights/scheduledQueryRules@2023-03-15-prev
 }
 ```
 
-### Managed Grafana Dashboards
+### Azure Monitor Workbooks
 
-Pre-built dashboards are maintained in [`observability/grafana/`](../../observability/grafana/). They surface:
+The Bicep-managed Azure Monitor workbooks surface:
 
 - Token consumption by LOB (per APIM subscription key)
 - Backend latency distribution per model
 - 429 rate and circuit-breaker failover frequency
 - Layer 1 vs. Layer 2 capacity headroom over time
 
-Access via the Azure portal or the ACI jumpbox. Dashboard JSON is provisioned through Bicep in `supporting-infra.bicep` — do not edit dashboards in the Grafana UI directly, as portal changes will be overwritten on the next `azd provision`.
+Access the workbooks through the Azure portal. Their definitions are provisioned by `infrastructure/bicep/workbooks.bicep`; update that module and run `azd provision` to change them.
 
 ---
 
@@ -1012,7 +973,7 @@ A request can hit the rate limit before any tokens are billed. Common causes:
 
 ### Why is the secondary Foundry account capacity so much higher?
 
-The secondary account (West US, 30K TPM) must absorb **100% of primary traffic** during a failover event. The circuit-breaker in [`policies/apim/circuit-breaker-multi-region.xml`](../../policies/apim/circuit-breaker-multi-region.xml) routes all requests to West US when East US returns 429 or 5xx. The 1K primary capacity is intentional for load-test demos; raise it to match secondary for production.
+The secondary account must absorb **100% of primary traffic** during a failover event. The inline policy in `infrastructure/bicep/apim-gateway.bicep` routes requests to the secondary account when the primary returns 429 or 5xx. Size regional capacities in `infrastructure/model-portfolio.json` accordingly.
 
 ### Quota is freed but deployments still fail with `QuotaExceeded`
 
@@ -1247,6 +1208,4 @@ When a retirement is announced (via Service Health alert or quarterly review):
 | `infrastructure/bicep/foundry-hub-project.bicep` | Foundry deployment `capacity` values |
 | `infrastructure/bicep/apim-gateway.bicep` | APIM product policy with token limits |
 | `infrastructure/bicep/foundry-apim-rbac.bicep` | RBAC assignments |
-| `policies/apim/token-quota-by-department.xml` | Per-department secondary rate limit |
-| `automation/servicenow/quota_increase_workflow.py` | ServiceNow quota increase request client |
 | `scripts/check-foundry-capacity.ps1` | PowerShell script to query current Foundry capacity |

@@ -12,16 +12,13 @@
       "value": "${AZURE_ENV_NAME}"
     },
     "companyPrefix": {
-      "value": "contoso"
+      "value": "${AZURE_COMPANY_PREFIX}"
     },
     "deployRbac": {
       "value": "${AZURE_DEPLOY_RBAC}"
     },
     "deployJumpbox": {
       "value": "${AZURE_DEPLOY_JUMPBOX}"
-    },
-    "deployFunctionApp": {
-      "value": "${AZURE_DEPLOY_FUNCTION_APP}"
     },
     "deployLoadTest": {
       "value": "${AZURE_DEPLOY_LOAD_TEST}"
@@ -31,6 +28,9 @@
     },
     "sslCertKeyVaultSecretId": {
       "value": "${AZURE_SSL_CERT_KV_SECRET_ID}"
+    },
+    "generatedSslCertificatePfx": {
+      "value": "${AZURE_SSL_CERT_PFX_BASE64}"
     }
   }
 }

@@ -7,7 +7,7 @@
 //   APIM overhead    (orange) — policy execution: auth, quota, cache lookup, logging (<50 ms healthy)
 //   Foundry inference(green)  — AI model generation time (dominates for large prompts / slow models)
 //
-// Orange segment growing → APIM policy adding latency (check semantic cache miss rate).
+// Orange segment growing → APIM policy or authentication adding latency.
 // Green segment growing  → Foundry under load or more expensive model called.
 
 let apimReqs = AppRequests

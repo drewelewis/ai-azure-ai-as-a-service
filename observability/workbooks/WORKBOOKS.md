@@ -149,7 +149,7 @@ Six series: P50 and P90 for each of the three layers. Shows end-to-end wall-cloc
 
 **How to diagnose latency spikes:**
 - `Backend P50` rises, `APIM Total P50 − Backend P50` stays flat → Foundry is the bottleneck (model under load)
-- `APIM Total P50 − Backend P50` rises, `Backend P50` stays flat → APIM policy overhead is the issue (check semantic cache, auth, quota policy)
+- `APIM Total P50 − Backend P50` rises, `Backend P50` stays flat → investigate APIM policy and authentication overhead
 - `AppGW P50 − APIM Total P50` rises → WAF inspection or TLS renegotiation overhead
 
 ---
@@ -197,7 +197,6 @@ One row per request. All columns needed to trace a specific failure or latency s
 - You want to investigate a specific slow or failed request by Correlation ID
 - You need per-layer latency percentiles (P50 / P95 / P99) for SLO reporting
 - You want to see which models a specific LOB subscription is calling and how often
-- You need to check the semantic cache hit rate
 - A WAF rule is blocking or matching — you need to know which rule and which URI
 - You want to understand the full traffic flow: LOB subscription → APIM product → Foundry backend
 
@@ -212,7 +211,7 @@ One row per request. All columns needed to trace a specific failure or latency s
 | Filter | Values | Effect |
 |---|---|---|
 | **Time Range** | 5 min / 15 min / 30 min / 1 hr / 4 hr / 1 day | Scopes every panel |
-| **Subscription** | All or one of: `app-branch-advisor`, `app-aml-screening`, `app-credit-underwriting`, `app-investment-platform` | Narrows all traffic charts and tables to that LOB |
+| **Subscription** | All or one cataloged LOB use-case subscription | Narrows traffic charts and tables to one use case |
 | **Correlation ID** | Paste a specific `X-Correlation-Id` value | Narrows the trace table and waterfall to one request |
 
 ---
@@ -236,17 +235,18 @@ Only requests carrying an `X-Correlation-Id` header are counted (App Gateway set
 
 ---
 
-### Panel 2 — Requests per Subscription over Time (stacked bar chart)
+### Panel 2 — Requests per Subscription over Time (clustered column chart)
 
-**Visualization:** Stacked bar chart, 5-minute buckets  
-**Data source:** `AppRequests`  
+**Visualization:** Clustered column chart, 5-minute buckets
+**Data source:** `AppRequests`
 **KQL:** [panel-02-requests-per-subscription.kql](KQL/e2e-trace/panel-02-requests-per-subscription.kql)
 
-Request volume over time, each colour = one APIM subscription (LOB). Tall bars with many colours = sustained concurrent load from multiple LOBs — the scenario that saturates primary Foundry TPM quota.
+Request volume over time, each coloured column = one APIM subscription (LOB). Columns are grouped side by side rather than stacked, so equal traffic remains visible while individual spikes, drops, gaps, and relative traffic rates stay directly comparable.
 
 **What to look for:**
 - One subscription suddenly dominating → a LOB is bursting beyond its quota
-- Total bar height rising then crashing → failover or quota exhaustion stopping requests
+- One subscription's column dropping or disappearing → that subscription stopped sending traffic or requests are being rejected before telemetry is emitted
+- All subscriptions rising or falling together → platform-wide demand change, failover, or quota pressure
 
 ---
 
@@ -261,7 +261,7 @@ Aggregate flow table: one row per unique combination of (LOB subscription, APIM 
 | Column | Description |
 |---|---|
 | `Subscription` | LOB APIM subscription name |
-| `Product` | Tier colour-coded: 🟤 `ai-bronze` / ⚪ `ai-silver` / 🟡 `ai-gold` |
+| `Product` | Tier colour-coded: 🟤 `bronze` / ⚪ `silver` / 🟡 `gold` |
 | `→ Foundry` | Which backend processed these requests |
 | `Requests` | Total request count for this combination |
 | `Errors` | Failed request count — heat bar (white → red) |
@@ -304,10 +304,10 @@ Each bar is divided into three stacked segments:
 | Segment | Colour | What it measures |
 |---|---|---|
 | **App GW overhead** | Blue | WAF inspection + TLS termination — currently 0 (join is approximate; see per-request table for accurate values) |
-| **APIM overhead** | Orange | Policy execution time: auth, quota check, cache lookup, header injection, logging — should be < 50 ms |
+| **APIM overhead** | Orange | Policy execution time: authentication, quota checks, header injection, and logging |
 | **Foundry inference** | Green | AI model generation time — dominates for large prompts or slow models |
 
-**Diagnosing spikes:** Orange segment grows → APIM policy is adding latency (check semantic cache miss rate). Green segment grows → Foundry is under load or a more expensive model was called.
+**Diagnosing spikes:** Orange growth indicates APIM policy or authentication latency. Green growth indicates Foundry load, model choice, or backend-region effects.
 
 ---
 
@@ -457,30 +457,10 @@ One row per (model, subscription) combination. No policy changes required — th
 | Column | Description |
 |---|---|
 | `Model` | Deployment name (e.g. `gpt-4o-mini`, `gpt-4o`, `Phi-4`, `Llama-3-70b`) |
-| `Subscription` | LOB subscription |
+| `Subscription` | APIM subscription display name |
 | `Requests` | Total call count |
 | `Errors` | Failed calls — ✅ 0 or ❌ > 0 icon |
 | `Avg (ms)` | Mean latency — green (fast) → red (slow) |
-
----
-
-### Panel 12 — Semantic Cache Hit Rate (table)
-
-**Visualization:** Table  
-**Data source:** `AppRequests` (requires `X-Cache` response header captured in APIM diagnostics)  
-**KQL:** [panel-12-cache-hit-rate.kql](KQL/e2e-trace/panel-12-cache-hit-rate.kql)
-
-> **Prerequisite:** The `X-Cache` header must be captured in the APIM diagnostics `frontend.response.headers` block in `apim-gateway.bicep`. Run `azd provision` once after that change to start populating data.
-
-One row per subscription showing how often the semantic cache served a response vs forwarded to Foundry.
-
-| Column | Description |
-|---|---|
-| `Subscription` | LOB subscription |
-| `Total` | All requests with a cache status header |
-| `Cache Hits` | Requests served from cache (X-Cache: HIT) |
-| `Cache Misses` | Requests forwarded to Foundry (X-Cache: MISS) |
-| `Hit Rate %` | 0% = red, 100% = green |
 
 ---
 
@@ -500,7 +480,7 @@ One row per subscription showing average TPM consumed vs the product tier cap.
 | `Requests` | Total requests in the time window |
 | `Total Tokens` | Sum of tokens consumed (prompt + completion) |
 | `Avg TPM` | Average tokens per minute over the selected window |
-| `TPM Cap` | Product tier limit: Bronze 500 · Silver 5 000 · Gold 5 500 |
+| `TPM Cap` | Product tier limit: Bronze 500 · Silver 1 000 · Gold 2 000 |
 | `% of Cap` | `Avg TPM / TPM Cap × 100` — use this to spot subscriptions approaching their quota |
 
 ---
@@ -531,7 +511,7 @@ One row per subscription showing average TPM consumed vs the product tier cap.
 |---|---|---|
 | **Time Range** | 5 min / 15 min / 30 min / 1 hr / 4 hr / 12 hr / 1 day | Scopes every panel |
 | **Chart Granularity** | 1 min / 5 min / 15 min / 30 min / 1 hr | Controls time-bucket width; RPM and TPM are normalised to tokens-per-minute equivalent regardless of bucket |
-| **Subscription** | All or one LOB | Narrows TPM and RPM panels to that LOB (latency percentile panel shows platform-wide regardless) |
+| **Subscription** | All or multiple LOBs | Narrows TPM and RPM panels to the selected subscriptions (latency percentile panel shows platform-wide regardless) |
 
 ---
 
@@ -591,9 +571,9 @@ Nine time-series lines: **P50 · P95 · P99** per layer.
 | **Foundry inference** | 🟢 Green (light→dark) | `BackendTime` | < 3 000 ms (gpt-4o-mini) |
 
 **How to read this chart:**
-- P50 and P99 diverging widely = bimodal traffic (cache hits vs cold inference in the same bucket)
+- P50 and P99 diverging widely = request or model mix has strongly different latency
 - Foundry P99 spike = model cold start or failover latency (+300–500 ms for West US secondary)
-- APIM overhead P99 spike = policy stall (semantic cache miss storm, synchronous Key Vault lookup)
+- APIM overhead P99 spike = policy or authentication stall
 - App GW P99 spike = WAF rule firing on a subset of requests — correlate with `AGWFirewallLogs`
 
 > **Join note:** App GW metrics are joined to APIM by time bucket only (no per-request correlation available from `AGWAccessLogs`). The App GW percentile lines are therefore independent aggregates per bucket, not stitched to individual APIM requests. For per-request App GW timing, use the E2E Trace workbook.

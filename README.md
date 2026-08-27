@@ -1,6 +1,6 @@
-﻿# Azure AI as a Managed Service
+# Azure AI as a Managed Service
 
-Enterprise platform for deploying Azure AI (LLMs, Agents, Evaluations) as a governed, self-service service  using **Azure API Management** as an AI gateway in front of **Azure AI Foundry**, with full audit logging, multi-region failover, and PCI DSS v4.0 support.
+Enterprise platform for deploying Azure AI models and Agents as a governed service using **Azure API Management** as an AI gateway in front of **Azure AI Foundry**, with audit logging and multi-region failover.
 
 ---
 
@@ -11,7 +11,6 @@ Enterprise platform for deploying Azure AI (LLMs, Agents, Evaluations) as a gove
 | **Developer** building AI apps | Builds AI-powered applications that call LLMs and agents through the platform. Uses standard OpenAI SDK — just swaps the endpoint. | [Developer Quick Start](docs/developer-quickstart.md) |
 | **Platform Engineer** setting up the platform | Builds and operates the platform. Runs `azd provision`, manages Bicep and APIM policies, sets quotas, monitors dashboards, and responds to incidents. | [Deploying the Platform](#deploying-the-platform) |
 | **IT Manager or Architect** evaluating the approach | Evaluates and approves the platform. Reviews architecture decisions, security model, compliance posture, and whether this approach fits organisational standards. | [Architecture Decision Records](docs/adr/) |
-| **Compliance Engineer** reviewing PCI controls | Audits the platform's PCI DSS v4.0 controls — WAF, VNet isolation, CHD detection, key management, and audit logging. | [PCI DSS v4.0 Compliance](#pci-dss-v40-compliance) |
 
 ---
 
@@ -19,11 +18,11 @@ Enterprise platform for deploying Azure AI (LLMs, Agents, Evaluations) as a gove
 
 | Challenge | Solution |
 |---|---|
-| **Uncontrolled LLM costs** | Per-tier TPM limits, semantic caching, chargeback by subscription key |
+| **Uncontrolled LLM costs** | Per-tier TPM/RPM limits and usage attribution by subscription key |
 | **No audit trail** | Every request logged to Log Analytics  latency, token counts, status codes |
 | **API key sprawl** | Developers get one APIM subscription key; no Foundry keys are distributed |
 | **Single region risk** | Circuit-breaker policy fails over to West US on 429 or 5xx automatically |
-| **PCI DSS compliance** | WAF, VNet isolation, private endpoints, CHD-detection policies, CMK |
+| **Public ingress protection** | WAF Prevention mode, TLS 1.2+, internal APIM, and private Foundry endpoints |
 | **Developer friction** | Standard OpenAI SDK works unchanged  just swap the endpoint |
 
 ---
@@ -35,11 +34,11 @@ graph LR
     Dev[" Developer / App"]
     Dev -->|APIM subscription key| APIM["Azure API Management\nPremium  Internal VNet\napim-contoso.azure-api.net"]
 
-    APIM -->|Managed identity token| F1["Azure AI Foundry\nPrimary  East US\ngpt-4o-mini  phi-4  phi-4-mini\ntext-embedding-3-small  text-embedding-3-large"]
-    APIM -->|Circuit-breaker failover| F2["Azure AI Foundry\nSecondary  West US\ngpt-4o-mini  phi-4  phi-4-mini\ntext-embedding-3-small  text-embedding-3-large"]
+    APIM -->|Managed identity token| F1["Azure AI Foundry\nPrimary region\nConfigurable model portfolio"]
+    APIM -->|Circuit-breaker failover| F2["Azure AI Foundry\nSecondary region\nMirrored model portfolio"]
 
     APIM -->|Telemetry| AI["Application Insights"]
-    APIM -->|Gateway logs| LA["Log Analytics\n395-day retention"]
+    APIM -->|Gateway logs| LA["Log Analytics\n90-day retention"]
 
     F1 --- PE1["Private Endpoint\n10.100.5.4"]
     F2 --- PE2["Private Endpoint\n10.100.5.7"]
@@ -71,11 +70,8 @@ azd auth login
 # 2. Create the azd environment
 azd env new dev
 
-# 3. Provision — the setup wizard prompts for all required values on first run
-azd provision
-
-# 4. Deploy the Function App code
-azd deploy
+# 3. Provision and validate the platform
+azd up
 ```
 
 The first `azd provision` runs an interactive setup wizard that prompts for:
@@ -85,13 +81,17 @@ The first `azd provision` runs an interactive setup wizard that prompts for:
 | Primary region | `eastus` | Region for APIM, networking, and supporting infra |
 | Secondary region | `westus` | Region for Foundry failover account and optional secondary App Gateway |
 | Resource group name | `rg-contoso-ai-platform-<env>` | Created automatically if it doesn't exist |
-| Deploying user object ID | Auto-detected | Grants your account Storage Blob access for `azd deploy` |
+| Deployment profile | `complete-development` | Use `production` to omit jumpbox and load-testing resources |
+| Deploying user object ID | Auto-detected | Grants least-privilege certificate deployment access |
 | Deploy RBAC assignments | Yes | Grants APIM managed identity Cognitive Services User on Foundry |
-| Deploy ACI jumpbox | Yes | VNet-internal container for dev/test access to APIM |
-| Deploy Function App | Yes | Event Grid automation handler |
-| SSL cert Key Vault secret ID | _(blank)_ | Leave blank to skip App Gateway WAF; add later with `azd provision` |
+| Deploy ACI jumpbox | Profile default | Required by `complete-development`; disabled by `production` |
+| Deploy Azure Load Testing | Profile default | Required by `complete-development`; disabled by `production` |
+| SSL cert Key Vault secret ID | _(blank)_ | Leave blank to create the Bicep-managed self-signed bootstrap certificate |
 
-> **Azure Load Testing is always deployed.** All 5 test definitions are created automatically by the postprovision hook — this is not a prompted option and cannot be skipped.
+Both profiles require RBAC and the governed Application Gateway/APIM/Foundry path.
+`complete-development` adds the VNet jumpbox
+and five Azure Load Testing definitions. The model portfolio is checked against both
+regional catalogs and quota pools before provisioning.
 
 Re-runs skip any variable already set in the environment — the wizard only prompts for missing values.
 
@@ -103,12 +103,13 @@ Pre-set all variables before running `azd provision --no-prompt`:
 azd env set AZURE_LOCATION eastus
 azd env set AZURE_SECONDARY_LOCATION westus
 azd env set AZURE_RESOURCE_GROUP rg-contoso-ai-platform-dev
+azd env set AZURE_COMPANY_PREFIX contoso
+azd env set AZURE_DEPLOYMENT_PROFILE complete-development
 azd env set AZURE_DEPLOYING_USER_OBJECT_ID (az ad signed-in-user show --query id -o tsv)
 azd env set AZURE_DEPLOY_RBAC true
 azd env set AZURE_DEPLOY_JUMPBOX true
-azd env set AZURE_DEPLOY_FUNCTION_APP true
-azd provision --no-prompt
-azd deploy
+azd env set AZURE_DEPLOY_LOAD_TEST true
+azd up --no-prompt
 ```
 
 ### What gets provisioned
@@ -116,14 +117,13 @@ azd deploy
 | Resource | Details |
 |---|---|
 | **Azure API Management** (Premium, Internal VNet) | Bronze / Silver / Gold products, 3 API surfaces, circuit-breaker policy |
-| **Azure AI Foundry** × 2 | Primary (primary region) + Secondary (secondary region); gpt-4o-mini + Phi-4 + Phi-4-mini + text-embedding-3-small + text-embedding-3-large model deployments |
+| **Azure AI Foundry** × 2 | Primary + secondary accounts with the mirrored portfolio from `infrastructure/model-portfolio.json` |
 | **Private Endpoints** × 2 | Both Foundry accounts reachable only via private DNS (no public network access) |
 | **Private DNS Zone** | `privatelink.cognitiveservices.azure.com` linked to the VNet |
-| **Log Analytics Workspace** | 395-day retention; APIM gateway logs + metrics |
+| **Log Analytics Workspace** | 90-day retention; APIM gateway logs + metrics |
 | **Application Insights** | API latency, token counts, HTTP status codes |
 | **Key Vault** | CMK for APIM, self-signed TLS cert |
-| **Managed Grafana** | Token usage + performance dashboards |
-| **Function App** (Flex Consumption) | APIM subscription event handler via Event Grid |
+| **Azure Monitor Workbooks** | Request tracing, backend routing, and performance views |
 | **ACI Jumpbox** | Linux container in VNet for testing APIM from inside the network |
 | **Azure Load Testing** | 5 test definitions pre-configured with APIM subscription keys, SSL bypass, and correct endpoints — ready to fire immediately |
 
@@ -176,68 +176,135 @@ curl -s -X POST \
 $RG   = (azd env get-values | Select-String 'AZURE_RESOURCE_GROUP').ToString().Split('=')[1].Trim('"')
 $APIM = az apim list -g $RG --query '[0].name' -o tsv
 
-# Bronze key (app-branch-advisor LOB)
-az apim subscription show --service-name $APIM -g $RG --subscription-id app-branch-advisor --query primaryKey -o tsv
+# Bronze use-case key
+az apim subscription show --service-name $APIM -g $RG --subscription-id consumer-customer-service --query primaryKey -o tsv
 
-# Silver key (app-aml-screening LOB)
-az apim subscription show --service-name $APIM -g $RG --subscription-id app-aml-screening --query primaryKey -o tsv
+# Silver use-case key
+az apim subscription show --service-name $APIM -g $RG --subscription-id consumer-account-opening --query primaryKey -o tsv
 ```
 
 ---
 
 ## Load Testing
 
-All five load test definitions are **created automatically by `azd provision`** — no manual setup needed. The postprovision hook (`scripts/configure-load-test.ps1`) runs unconditionally and registers every test definition in Azure Load Testing, injects the correct APIM subscription keys, and uploads the SSL bypass files. After `azd provision && azd deploy` every test is ready to fire immediately.
+The `complete-development` profile configures five tests in Azure Load Testing as
+part of `azd provision`. The production profile does not deploy or configure load
+testing. The load generators run in Azure, but developers launch and monitor those
+managed runs from their local workstation using the repository's PowerShell
+scripts. The repository does not run a local JMeter engine.
 
-All tests route traffic through App Gateway WAF → APIM → Foundry. Run any script from the repo root — it will resolve all resource names automatically from your `azd` environment.
+### How the tests are configured
+
+Load testing has three ownership layers:
+
+| Layer | Owner | Responsibility |
+|---|---|---|
+| Azure resources | `infrastructure/bicep/load-testing.bicep` and `networking.bicep` | Create the Azure Load Testing resource, its managed identity, the dedicated `snet-loadtest` subnet, VNet RBAC, NSG access to internal APIM, and the `LOAD_TEST_SUBNET_ID` output |
+| Workload behavior | `load_tests/definitions/*.jmx` | Define request paths, concurrency, duration, assertions, model calls, and per-subscription traffic patterns |
+| Test reconciliation | `scripts/configure-load-test.ps1` | Create or update each Azure Load Testing data-plane test, upload its JMX and support files, inject runtime values, assign `snet-loadtest`, and verify the returned subnet ID |
+
+Individual Azure Load Testing test definitions and JMX uploads are data-plane
+objects, not ARM resources exposed by the Azure Load Testing Bicep resource type.
+That is why Bicep owns the workspace and network while the azd postprovision hook
+reconciles the five tests.
+
+### How private endpoint testing works
+
+Every test is configured with the Bicep-exported `LOAD_TEST_SUBNET_ID`. Azure Load
+Testing creates test-engine NICs in `snet-loadtest` for the duration of a run. The
+Load Testing resource's managed identity has Network Contributor on the VNet so
+the service can create those NICs. Test creation fails if the subnet output is
+missing, and configuration fails if Azure reports a different subnet afterward.
+
+```mermaid
+flowchart LR
+  ALT[Azure Load Testing engine] -->|NIC in snet-loadtest| DNS[Private DNS linked to VNet]
+  DNS --> APIM[APIM Premium internal endpoint]
+  ALT -->|four App Gateway tests| AGW[Application Gateway WAF]
+  AGW --> APIM
+  APIM -->|managed identity over private endpoint| Primary[Primary Foundry]
+  APIM -->|circuit-state failover| Secondary[Secondary Foundry]
+```
+
+The direct APIM smoke test resolves the internal APIM hostname through VNet-linked
+private DNS. The other four tests call Application Gateway, which forwards to the
+same internal APIM instance. APIM then authenticates to both private Foundry
+backends with its managed identity; Azure Load Testing never receives model keys.
+
+During postprovision, the signed-in provisioning identity retrieves the eight APIM
+subscription keys through the management API. The script writes temporary
+`user.properties` files, uploads them to the corresponding test definitions, and
+deletes the local temporary files. Keys are not committed to the repository.
+
+### Launching an Azure test locally
+
+The workstation needs PowerShell, Azure CLI with the `load` extension, Azure
+Developer CLI, an authenticated Azure session, and the intended azd environment
+selected. `azd provision` must already have configured the managed test
+definitions.
+
+Launch the interactive menu from the repository root:
+
+```powershell
+.\_loadtest.bat
+```
+
+On non-Windows systems, run `pwsh load_tests/scripts/run_load_test.ps1` directly.
+
+The local script does not generate traffic. It submits a run to Azure Load
+Testing, polls the managed run to a terminal state, prints its result, and exits
+nonzero when Azure reports a failed run. A specific test can be launched directly:
+
+```powershell
+.\_loadtest.bat -TestId apim-smoke-test
+```
 
 ### Adding a new load test
 
 1. Add your JMX file to `load_tests/definitions/`.
 2. Add a `Register-AltTest` call in `scripts/configure-load-test.ps1` (the single owner of all test definitions).
-3. Add a `run-<name>.ps1` script that only fires the run (does not create the definition).
+3. Add the test metadata and `ValidateSet` value to `load_tests/scripts/run_load_test.ps1`.
 4. Run `azd provision` — the new test definition will be created automatically.
 
-### Test scripts
+### What the tests exercise
 
 | Script | ALT test ID | Duration | What it proves |
 |---|---|---|---|
-| `scripts/run-apim-smoke-test.ps1` | `apim-smoke-test` | ~2 min | Direct APIM smoke test — validates the internal VNet path (no App Gateway) is healthy |
-| `scripts/run-appgw-failover-test.ps1` | `appgw-failover-test` | ~2 min | Circuit breaker fires and APIM transparently retries on secondary Foundry |
-| `scripts/run-multi-sub-failover-test.ps1` | `multi-sub-failover-test` | ~2 min | Bronze **and** Silver subscriptions both fail over independently under shared TPM pressure |
-| `scripts/run-steady-state-test.ps1` | `steady-state-test` | 1 hour | All four LOB subscriptions produce smooth baseline traffic — no throttling, no gaps in dashboards |
-| `scripts/run-appgw-smoke-test.ps1` | `appgw-smoke-test` | ~5 min | Measures WAF inspection overhead vs the direct-APIM baseline latency (~10–30 ms expected) |
+| `load_tests/scripts/run_load_test.ps1 -TestId apim-smoke-test` | `apim-smoke-test` | ~2 min | Direct APIM smoke test — validates the internal VNet path (no App Gateway) is healthy |
+| `load_tests/scripts/run_load_test.ps1 -TestId appgw-failover-test` | `appgw-failover-test` | ~2 min | Circuit breaker fires and APIM transparently retries on secondary Foundry |
+| `load_tests/scripts/run_load_test.ps1 -TestId multi-sub-failover-test` | `multi-sub-failover-test` | ~2 min | Eight LOB subscriptions across Bronze, Silver, and Gold remain isolated under shared TPM pressure |
+| `load_tests/scripts/run_load_test.ps1 -TestId steady-state-test` | `steady-state-test` | 1 hour | All eight LOB use-case subscriptions produce baseline traffic across Bronze, Silver, and Gold |
+| `load_tests/scripts/run_load_test.ps1 -TestId appgw-smoke-test` | `appgw-smoke-test` | ~5 min | Measures WAF inspection overhead vs the direct-APIM baseline latency (~10–30 ms expected) |
 
 ### Choosing the right test
 
-- **Verifying the deployment is healthy** → `run-apim-smoke-test.ps1`  
-  Hits APIM directly over the internal VNet path (no App Gateway). This is the fastest way to confirm gpt-4o-mini is reachable and the Bronze/Silver subscription keys are valid. Run this immediately after `azd provision && azd deploy`.
+- **Verifying the deployment is healthy** -> `load_tests/scripts/run_load_test.ps1 -TestId apim-smoke-test`
+  Hits APIM directly over the internal VNet path (no App Gateway). This is the fastest way to confirm gpt-4o-mini is reachable and the Bronze/Silver subscription keys are valid. Run this immediately after `azd provision`.
 
-> **`run-load-test.ps1`** is an interactive launcher that presents all 5 tests with descriptions and recommendations — useful when you’re not sure which test to run.
+> **`load_tests/scripts/run_load_test.ps1`** is an interactive launcher that presents all five tests with descriptions and recommendations.
 
-- **Validating the failover policy after a change** → `run-appgw-failover-test.ps1`  
+- **Validating the failover policy after a change** -> `load_tests/scripts/run_load_test.ps1 -TestId appgw-failover-test`
   Deliberately exhausts the primary Foundry TPM cap and confirms every request still returns HTTP 200 via the secondary, with `X-Backend-Region-Used: secondary-failover` in the response.
 
-- **Proving multi-LOB isolation** → `run-multi-sub-failover-test.ps1`  
-  Runs Bronze and Silver blast suites concurrently. Use this when you need to demonstrate that one tenant's burst does not black out another tenant's subscription.
+- **Proving subscription isolation** -> `load_tests/scripts/run_load_test.ps1 -TestId multi-sub-failover-test`
+  Runs all eight LOB use-case subscriptions across Bronze, Silver, and Gold to verify that one subscription's burst does not block another.
 
-- **Populating monitoring dashboards / alerting baselines** → `run-steady-state-test.ps1`  
-  Sends ~160 TPM across four LOB subscriptions for one hour — well under the 1K TPM cap so no failover occurs. Run this overnight to generate realistic traffic for Grafana and the App Insights workbook.  
-  Can run **concurrently** with `run-multi-sub-failover-test.ps1` (different ALT test ID).
+- **Populating monitoring dashboards / alerting baselines** -> `load_tests/scripts/run_load_test.ps1 -TestId steady-state-test`
+  Sends low-volume traffic across all eight LOB use-case subscriptions for one hour, below the configured tier limits. Run this overnight to generate per-use-case traffic for Application Insights and Azure Monitor workbooks.
+  Can run **concurrently** with `load_tests/scripts/run_load_test.ps1 -TestId multi-sub-failover-test` because the tests use different Azure Load Testing IDs.
 
-- **Measuring App Gateway WAF overhead** → `run-appgw-smoke-test.ps1`  
+- **Measuring App Gateway WAF overhead** -> `load_tests/scripts/run_load_test.ps1 -TestId appgw-smoke-test`
   Compares AppGW-path latency against the stored direct-APIM baseline. Use after updating WAF rules or upgrading the App Gateway SKU to confirm the overhead stays within acceptable bounds.
 
 ### Reading the results
 
-After any test completes the script prints a summary table. For deeper analysis:
+After a test completes, the local launcher prints the Azure run status and test
+result. Detailed client metrics and failures are available on the managed run in
+Azure Load Testing. For platform telemetry analysis:
 
 ```powershell
 # Open the failover analysis workbook
 scripts/analyze-appinsights.ps1
-
-# Check circuit breaker state across backends
-scripts/check-circuit-breaker-cache.ps1
 ```
 
 ---
@@ -246,13 +313,47 @@ scripts/check-circuit-breaker-cache.ps1
 
 ### Subscription Tiers
 
-Developers request access through ServiceNow and receive a single APIM subscription key scoped to a tier:
+Applications receive one APIM subscription key per use case, scoped to a product
+tier. `infrastructure/subscriptions/catalog.json` is the source of truth for
+subscription IDs, display names, product assignments, and onboarding metadata.
+`azd provision` reconciles the catalog through the dedicated
+`apim-subscriptions.bicep` module; APIM generates the keys, which are never stored
+in source control.
 
 | Tier | Models | TPM | RPM | Approval | Use case |
 |---|---|---|---|---|---|
-| **Bronze** | gpt-4o-mini, Phi-4, Phi-4-mini, text-embedding-3-small | 500 | 60 | Self-service | Dev/test, low-volume apps |
-| **Silver** | gpt-4o, gpt-4o-mini, Phi-4, Phi-4-mini, Llama-3, text-embedding-3-small + Agents API | 1,000 | 120 | Self-service | Production workloads |
-| **Gold** | All models incl. text-embedding-3-large + Agents API (PCI DSS scope eligible) | 2,000 | 240 | Requires approval | High-volume / PCI workloads |
+| **Bronze** | Entry chat and embedding deployments selected by the portfolio | 500 | 60 | Self-service | Dev/test, low-volume apps |
+| **Silver** | Broader chat portfolio + Agents API | 1,000 | 120 | Self-service | Production workloads |
+| **Gold** | Entire deployed portfolio + Agents API | 2,000 | 240 | Requires approval | High-volume workloads |
+
+#### LOB subscription catalog
+
+Each use case receives its own APIM subscription and key so quota, access,
+telemetry, and lifecycle can be managed independently. Use the stable
+`<lob>-<use-case>` identifier as the APIM subscription ID.
+
+| Line of business | Use case | Subscription ID | Initial tier |
+|---|---|---|---|
+| Consumer Banking | Customer service assistant | `consumer-customer-service` | Bronze |
+| Consumer Banking | Account-opening assistant | `consumer-account-opening` | Silver |
+| Commercial Banking | Relationship-manager assistant | `commercial-relationship-manager` | Bronze |
+| Commercial Banking | Credit-memo drafting and review | `commercial-credit-memo` | Gold |
+| Corporate and Investment Banking | Deal research | `cib-deal-research` | Silver |
+| Corporate and Investment Banking | Due-diligence review | `cib-due-diligence` | Gold |
+| Wealth Management | Advisor copilot | `wealth-advisor-copilot` | Gold |
+| Wealth Management | Portfolio commentary | `wealth-portfolio-commentary` | Silver |
+
+These eight subscriptions are declared in
+`infrastructure/subscriptions/catalog.json` and provisioned in every deployment
+profile. Add or change a production subscription by editing the catalog, reviewing
+the change, and running `azd provision`. To retire a subscription, set `enabled` to
+`false` and retain that catalog entry until every environment has run
+`azd provision`; the Bicep-owned reconciler then removes that catalog-managed
+subscription without touching subscriptions outside the catalog.
+
+Load tests use these same eight use-case subscriptions; no dedicated test
+subscriptions are provisioned. The Bicep reconciler retains the four retired
+`test-*` IDs only as deletion tombstones for existing environments.
 
 > **TPM** (Tokens Per Minute) — counts the combined prompt + completion tokens across all requests in the current minute window. A typical short chat exchange is ~500–1,000 tokens; a document-processing request may be 4,000–8,000 tokens.  
 > **RPM** (Requests Per Minute) — counts the number of API calls regardless of their size. A 10-token ping and a 4,000-token document request both count as 1 RPM.
@@ -262,16 +363,18 @@ Developers request access through ServiceNow and receive a single APIM subscript
 | Model | Bronze | Silver | Gold |
 |---|:---:|:---:|:---:|
 | `gpt-4o-mini` | ✓ | ✓ | ✓ |
-| `phi-4` | ✓ | ✓ | ✓ |
-| `phi-4-mini` | ✓ | ✓ | ✓ |
+| `gpt-4.1-mini` | ✓ | ✓ | ✓ |
+| `gpt-5-nano` | — | ✓ | ✓ |
 | `text-embedding-3-small` | ✓ | ✓ | ✓ |
-| `gpt-4o` | — | ✓ | ✓ |
-| `llama-3` / `meta-llama` | — | ✓ | ✓ |
 | `text-embedding-3-large` | — | — | ✓ |
-| *(future models)* | — | — | ✓ |
 | **Agents API** | — | ✓ | ✓ |
 
-> **TPM limits are aggregate, not per-model.** A Bronze subscription has a single 500 TPM bucket shared across all three models it can access — calling `phi-4-mini` and `gpt-4o-mini` draws from the same counter. This keeps enforcement simple and predictable. If your workload needs to guarantee capacity for a high-priority model independently of batch traffic on a cheaper model, request a Silver or Gold tier where the larger bucket reduces contention, or open a quota increase request via ServiceNow.
+The table shows the default portfolio. Change `infrastructure/model-portfolio.json`
+to select different regionally available models, capacities, capabilities, and tier
+assignments. Preflight requires at least five unique deployments, including three
+chat and one embedding deployment, and validates the selection in both regions.
+
+> **TPM limits are aggregate, not per-model.** A Bronze subscription has a single 500 TPM bucket shared across every deployment it can access. This keeps enforcement simple and predictable. Workloads that need more capacity should request a reviewed Bicep change to their APIM product tier or Foundry capacity.
 
 #### How quota works in this platform
 
@@ -311,7 +414,7 @@ pie title Per-subscription Request throughput (RPM)
     "Gold (240)" : 240
 ```
 
-> All tiers include multi-region circuit-breaker failover (East US → West US). Gold requires manual approval and is limited to one subscription per customer (PCI DSS Req 7).
+> All tiers include multi-region circuit-breaker failover (East US → West US). Gold requires manual approval and is limited to one subscription per customer.
 
 ### API Surfaces
 
@@ -349,9 +452,9 @@ response = client.chat.completions.create(
 )
 ```
 
-### `/models`  Native Foundry inference (recommended for Phi-4)
+### `/models`  Native Foundry inference
 
-Provider-agnostic schema. Phi-4 and all Microsoft-family models work best here:
+Provider-agnostic schema for deployments exposed through the Foundry inference API:
 
 ```python
 from azure.ai.inference import ChatCompletionsClient
@@ -362,7 +465,7 @@ client = ChatCompletionsClient(
     credential=AzureKeyCredential("<apim-subscription-key>")
 )
 response = client.complete(
-    model="phi-4",          # also: "phi-4-mini"
+    model="gpt-4.1-mini",
     messages=[{"role": "user", "content": "Hello"}]
 )
 ```
@@ -385,8 +488,6 @@ run = client.agents.create_and_process_run(thread_id=thread.id, agent_id=agent.i
 messages = client.agents.list_messages(thread_id=thread.id)
 ```
 
-See [examples/python/](examples/python/) and [examples/csharp/](examples/csharp/) for full working samples.
-
 ---
 
 ## Repository Structure
@@ -398,37 +499,13 @@ infrastructure/
     networking.bicep               VNet + subnets + private endpoint subnet
     foundry-hub-project.bicep      2 AIServices accounts + private endpoints + DNS
     apim-gateway.bicep             APIM Premium + 3 APIs + Bronze/Silver/Gold policies
+    apim-subscriptions.bicep       Catalog-driven LOB use-case subscriptions
     foundry-apim-rbac.bicep        Cognitive Services User grant for APIM identity
-    event-grid-automation.bicep    Function App + storage + Event Grid
-    supporting-infra.bicep         Log Analytics + Key Vault
-    managed-grafana.bicep          Grafana dashboards
-    waf-appgw.bicep                App Gateway WAF v2 (production  requires SSL cert)
-  terraform/                       Terraform equivalents (apim-gateway, foundry-hub-project)
-
-automation/
-  functions/                       APIM subscription event handler (Python, Flex Consumption)
-  servicenow/                      Provisioning & quota request workflows
-
-policies/
-  apim/
-    auth-header-validation.xml
-    token-quota-by-department.xml
-    semantic-caching.xml
-    circuit-breaker-multi-region.xml
-    pci-dss-cardholder-data-protection.xml
-    pci-dss-audit-logging.xml
-    circuit-breaker-guide.md          Circuit breaker deployment guide
-    mock-responses.md                 APIM mock responses for load testing
-
-observability/
-  grafana/dashboards/
-    performance-dashboard.json
-    token-usage-dashboard.json
-
-examples/
-  python/                          6 working examples (simple chat  Foundry agents)
-  csharp/                          4 working examples
-
+    supporting-infra.bicep         Log Analytics + Application Insights + Key Vault
+    workbooks.bicep                Azure Monitor workbooks
+    waf-appgw.bicep                App Gateway WAF v2 (production requires SSL cert)
+  subscriptions/
+    catalog.json                   APIM subscription IDs, products, and use-case metadata
 docs/
   developer-quickstart.md
   developer-workflow-30days.md
@@ -443,7 +520,8 @@ scripts/
   entra-id/                        Group and project provisioning scripts
 
 load_tests/
-  test-sdk-endpoint-routing.py
+  definitions/                    JMeter plans for APIM and App Gateway paths
+  scripts/                        Consolidated Azure Load Testing launcher
 ```
 
 ---
@@ -454,8 +532,8 @@ The platform uses two complementary monitoring layers. They answer different que
 
 | Layer | Where data lives | What it captures | Primary use |
 |---|---|---|---|
-| **App Gateway + APIM logs → Log Analytics** | `AGWAccessLogs`, `ApiManagementGatewayLogs` tables in LAW | Every HTTP request at the network/gateway level — WAF rule hits, TLS negotiation, backend routing, raw latency at each hop | Backend routing workbook, WAF forensics, PCI audit trail |
-| **APIM → Application Insights → Log Analytics** | `AppRequests`, `AppDependencies` tables in the same LAW | Request-level SDK telemetry — operation names, per-request distributed trace IDs, Foundry backend dependency spans, custom dimensions (X-Correlation-Id, model, tier) | E2E trace workbook, latency breakdown script, Grafana dashboards |
+| **App Gateway + APIM logs → Log Analytics** | `AGWAccessLogs`, `ApiManagementGatewayLogs` tables in LAW | Every HTTP request at the network/gateway level — WAF rule hits, TLS negotiation, backend routing, raw latency at each hop | Backend routing workbook, WAF forensics, and operational audit |
+| **APIM → Application Insights → Log Analytics** | `AppRequests`, `AppDependencies` tables in the same LAW | Request-level SDK telemetry — operation names, per-request distributed trace IDs, Foundry backend dependency spans, custom dimensions (X-Correlation-Id, model, tier) | E2E trace workbook and latency breakdown script |
 
 ### Why both layers?
 
@@ -576,19 +654,11 @@ Outputs 6 sections: APIM request breakdown, Foundry dependency calls, APIM overh
 
 ---
 
-## PCI DSS v4.0 Compliance
-
-See [README-pci.md](README-pci.md) for the full PCI DSS v4.0 compliance documentation, including the required service list, architecture overview, policy guardrails, and service summary table.
-
----
-
 ## Further Reading
 
 - [Architecture Decision Records](docs/adr/)  why APIM, why Foundry, why this network topology
 - [Implementation Playbooks](docs/playbooks/)  step-by-step operator guides
 - [Developer Quick Start](docs/developer-quickstart.md)  how developers onboard and call the APIs
-- [Code Examples](examples/)  Python and C# samples for all API surfaces
-- [PCI DSS Configuration Playbook](docs/playbooks/pci-dss-configuration.md)  detailed PCI setup guide
 
 ---
 

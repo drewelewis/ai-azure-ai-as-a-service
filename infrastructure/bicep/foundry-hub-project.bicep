@@ -6,12 +6,8 @@
 //
 // This template creates:
 //   - 2 Foundry accounts (East US primary, West US secondary)
-//     aligned with the circuit-breaker-multi-region.xml APIM policy
-//   - Model deployments on each account:
-//       • gpt-4o-mini  (OpenAI format, primary=1K TPM, secondary=30K TPM — pay-as-you-go, lowest-cost chat model)
-//       • Phi-4        (Microsoft format, 1K TPM — open-weight, very low cost)
-//   - Azure AI Search (shared, for RAG across both accounts)
-//   - Cognitive Services User RBAC for each developer
+//     aligned with the inline APIM failover policy
+//   - A configurable portfolio of chat and embedding deployments on each account
 
 // ---------------------------------------------------------------------------
 // Parameters
@@ -26,11 +22,9 @@ param primaryLocation string = 'eastus'
 @description('Secondary region — must match APIM circuit breaker secondaryBackend')
 param secondaryLocation string = 'westus'
 
-@description('Object IDs of developers who should get Cognitive Services User access')
-param developerObjectIds array = []
-
-@description('Set to true to create role assignments (requires Owner or User Access Administrator)')
-param deployRbac bool = false
+@description('Model portfolio deployed identically to both regions. Each item supplies deployment/model identity, SKU, regional capacities, capability, and product tiers.')
+@minLength(5)
+param modelDeployments array
 
 @description('Resource ID of the VNet to link the private DNS zone to. Required when privateEndpointSubnetId is set.')
 param vnetResourceId string = ''
@@ -59,109 +53,23 @@ resource foundry1 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
   }
 }
 
-// gpt-4o (deployed as 'gpt-4o-mini' to keep APIM URLs unchanged) on primary
-// gpt-4o-mini 2024-07-18 was deprecated 2026-03-31; gpt-4o 2024-11-20 is the
-// current GA replacement.  Deployment name kept as 'gpt-4o-mini' so the APIM
-// policy URL (/openai/deployments/gpt-4o-mini/chat/completions) is unchanged.
-// capacity=1 (1K TPM nominal, ~2K burst): combined BA (~285 TPM) + AML blast (~981 TPM)
-// + CU blast (~981 TPM) ≈ 2247 TPM exceeds even burst allowance (~2K), causing sustained
-// 429s that trigger the APIM <choose> failover to contoso-foundry-secondary (West US, 30K TPM).
-// Raise back to 5 or higher for production; keep at 1 for failover load-test demos.
-resource gpt4oMini1 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
+@batchSize(1)
+resource primaryModelDeployments 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = [for model in modelDeployments: {
   parent: foundry1
-  name: 'gpt-4o-mini'
+  name: model.deploymentName
   sku: {
-    name: 'Standard'
-    capacity: 1  // 1K TPM — combined 3-LOB ~2.2K TPM exceeds burst; triggers failover to secondary
+    name: model.skuName
+    capacity: model.primaryCapacity
   }
   properties: {
     model: {
-      format: 'OpenAI'
-      name: 'gpt-4o'
-      version: '2024-11-20'
+      format: model.format
+      name: model.modelName
+      version: model.version
     }
     versionUpgradeOption: 'OnceCurrentVersionExpired'
   }
-}
-
-// Phi-4 on primary — Microsoft open-weight model, very low cost
-resource phi4_1 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
-  parent: foundry1
-  name: 'phi-4'
-  dependsOn: [gpt4oMini1]  // Deployments must be created sequentially per account
-  sku: {
-    name: 'GlobalStandard'  // Phi-4 v2 requires GlobalStandard; Standard is not supported
-    capacity: 1  // 1K TPM — Phi-4 is highly efficient; increase if needed
-  }
-  properties: {
-    model: {
-      format: 'Microsoft'
-      name: 'Phi-4'
-      version: '2'
-    }
-    versionUpgradeOption: 'OnceCurrentVersionExpired'
-  }
-}
-
-// Phi-4-mini on primary — lighter-weight successor to Phi-4, even lower cost
-// GlobalStandard required for Microsoft open-weight models (Standard not supported)
-resource phi4mini_1 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
-  parent: foundry1
-  name: 'phi-4-mini'
-  dependsOn: [phi4_1]  // Deployments must be created sequentially per account
-  sku: {
-    name: 'GlobalStandard'
-    capacity: 1  // 1K TPM — lightweight model; increase for production workloads
-  }
-  properties: {
-    model: {
-      format: 'Microsoft'
-      name: 'Phi-4-mini-instruct'
-      version: '1'
-    }
-    versionUpgradeOption: 'OnceCurrentVersionExpired'
-  }
-}
-
-// text-embedding-3-small on primary — lightweight embedding model; Bronze, Silver, and Gold tiers
-// OpenAI format; GlobalStandard SKU for cross-region availability.
-resource embeddingSmall_1 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
-  parent: foundry1
-  name: 'text-embedding-3-small'
-  dependsOn: [phi4mini_1]  // Deployments must be created sequentially per account
-  sku: {
-    name: 'GlobalStandard'
-    capacity: 120  // 120K TPM — typical minimum for embedding deployments
-  }
-  properties: {
-    model: {
-      format: 'OpenAI'
-      name: 'text-embedding-3-small'
-      version: '1'
-    }
-    versionUpgradeOption: 'OnceCurrentVersionExpired'
-  }
-}
-
-// text-embedding-3-large on primary — high-dimension embedding model; Gold tier only
-// APIM Bronze/Silver allowlists block this deployment by URL path; Gold has no allowlist.
-resource embeddingLarge_1 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
-  parent: foundry1
-  name: 'text-embedding-3-large'
-  dependsOn: [embeddingSmall_1]  // Deployments must be created sequentially per account
-  sku: {
-    name: 'GlobalStandard'
-    capacity: 120  // 120K TPM — typical minimum for embedding deployments
-  }
-  properties: {
-    model: {
-      format: 'OpenAI'
-      name: 'text-embedding-3-large'
-      version: '1'
-    }
-    versionUpgradeOption: 'OnceCurrentVersionExpired'
-  }
-}
+}]
 
 // ---------------------------------------------------------------------------
 // Foundry Account 2 — Secondary (West US)
@@ -184,99 +92,23 @@ resource foundry2 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
   }
 }
 
-// Same model set on secondary for failover consistency
-// capacity=30 — must absorb 100% of primary overflow during failover test.
-resource gpt4oMini2 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
+@batchSize(1)
+resource secondaryModelDeployments 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = [for model in modelDeployments: {
   parent: foundry2
-  name: 'gpt-4o-mini'
+  name: model.deploymentName
   sku: {
-    name: 'Standard'
-    capacity: 30  // 30K TPM — handles full failover overflow from primary
+    name: model.skuName
+    capacity: model.secondaryCapacity
   }
   properties: {
     model: {
-      format: 'OpenAI'
-      name: 'gpt-4o'
-      version: '2024-11-20'
+      format: model.format
+      name: model.modelName
+      version: model.version
     }
     versionUpgradeOption: 'OnceCurrentVersionExpired'
   }
-}
-
-resource phi4_2 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
-  parent: foundry2
-  name: 'phi-4'
-  dependsOn: [gpt4oMini2]
-  sku: {
-    name: 'GlobalStandard'  // Phi-4 v2 requires GlobalStandard; Standard is not supported
-    capacity: 1
-  }
-  properties: {
-    model: {
-      format: 'Microsoft'
-      name: 'Phi-4'
-      version: '2'
-    }
-    versionUpgradeOption: 'OnceCurrentVersionExpired'
-  }
-}
-
-// Phi-4-mini on secondary — mirrors primary for failover consistency
-resource phi4mini_2 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
-  parent: foundry2
-  name: 'phi-4-mini'
-  dependsOn: [phi4_2]  // Deployments must be created sequentially per account
-  sku: {
-    name: 'GlobalStandard'
-    capacity: 1
-  }
-  properties: {
-    model: {
-      format: 'Microsoft'
-      name: 'Phi-4-mini-instruct'
-      version: '1'
-    }
-    versionUpgradeOption: 'OnceCurrentVersionExpired'
-  }
-}
-
-// text-embedding-3-small on secondary — mirrors primary for failover consistency
-resource embeddingSmall_2 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
-  parent: foundry2
-  name: 'text-embedding-3-small'
-  dependsOn: [phi4mini_2]  // Deployments must be created sequentially per account
-  sku: {
-    name: 'GlobalStandard'
-    capacity: 120  // 120K TPM — typical minimum for embedding deployments
-  }
-  properties: {
-    model: {
-      format: 'OpenAI'
-      name: 'text-embedding-3-small'
-      version: '1'
-    }
-    versionUpgradeOption: 'OnceCurrentVersionExpired'
-  }
-}
-
-// text-embedding-3-large on secondary — mirrors primary for failover consistency
-resource embeddingLarge_2 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
-  parent: foundry2
-  name: 'text-embedding-3-large'
-  dependsOn: [embeddingSmall_2]  // Deployments must be created sequentially per account
-  sku: {
-    name: 'GlobalStandard'
-    capacity: 120  // 120K TPM — typical minimum for embedding deployments
-  }
-  properties: {
-    model: {
-      format: 'OpenAI'
-      name: 'text-embedding-3-large'
-      version: '1'
-    }
-    versionUpgradeOption: 'OnceCurrentVersionExpired'
-  }
-}
+}]
 
 // ---------------------------------------------------------------------------
 // Private Endpoints + Private DNS
@@ -320,9 +152,7 @@ resource pe1 'Microsoft.Network/privateEndpoints@2023-05-01' = if (deployPrivate
   // Must wait for ALL model deployments to complete before creating the PE.
   // Model deployments put the account in 'Accepted' state; PE creation fails if
   // the account is not in 'Succeeded' state.
-  // embeddingLarge_1 is the tail of the primary deployment chain:
-  //   gpt4oMini1 → phi4_1 → phi4mini_1 → embeddingSmall_1 → embeddingLarge_1
-  dependsOn: [embeddingLarge_1]
+  dependsOn: [primaryModelDeployments]
   properties: {
     subnet: {
       id: privateEndpointSubnetId
@@ -359,9 +189,7 @@ resource pe1DnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroup
 resource pe2 'Microsoft.Network/privateEndpoints@2023-05-01' = if (deployPrivateEndpoints) {
   name: 'pe-${accountPrefix}-secondary'
   location: primaryLocation  // PE location = VNet region, not the target resource region
-  // embeddingLarge_2 is the tail of the secondary deployment chain:
-  //   gpt4oMini2 → phi4_2 → phi4mini_2 → embeddingSmall_2 → embeddingLarge_2
-  dependsOn: [embeddingLarge_2]
+  dependsOn: [secondaryModelDeployments]
   properties: {
     subnet: {
       id: privateEndpointSubnetId
@@ -392,32 +220,6 @@ resource pe2DnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroup
     ]
   }
 }
-
-// ---------------------------------------------------------------------------
-// RBAC: Cognitive Services User on both Foundry accounts for each developer
-// ---------------------------------------------------------------------------
-
-var cognitiveServicesUserRoleId = 'a97b65f3-24c7-4388-baec-2e87135dc908'
-
-resource devRoleFoundry1 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for objectId in (deployRbac ? developerObjectIds : []): {
-  scope: foundry1
-  name: guid(foundry1.id, objectId, cognitiveServicesUserRoleId)
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cognitiveServicesUserRoleId)
-    principalId: objectId
-    principalType: 'User'
-  }
-}]
-
-resource devRoleFoundry2 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for objectId in (deployRbac ? developerObjectIds : []): {
-  scope: foundry2
-  name: guid(foundry2.id, objectId, cognitiveServicesUserRoleId)
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cognitiveServicesUserRoleId)
-    principalId: objectId
-    principalType: 'User'
-  }
-}]
 
 // ---------------------------------------------------------------------------
 // Outputs

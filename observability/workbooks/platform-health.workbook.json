@@ -49,6 +49,9 @@
             "name": "SubscriptionName",
             "label": "Subscription",
             "type": 2,
+            "multiSelect": true,
+            "quote": "\"",
+            "delimiter": ",",
             "isRequired": false,
             "isGlobal": true,
             "query": "AppRequests\n| where TimeGenerated {TimeRange}\n| extend sub = tostring(Properties[\"Subscription Name\"])\n| where isnotempty(sub)\n| summarize by sub\n| sort by sub asc\n| project value = sub",
@@ -57,7 +60,7 @@
             "crossComponentResources": [
               "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-contoso-ai-platform-dev/providers/Microsoft.OperationalInsights/workspaces/law-contoso-ai-dev"
             ],
-            "value": "value:all",
+            "value": ["value:all"],
             "typeSettings": {
               "additionalResourceOptions": ["value:all"],
               "showDefault": false
@@ -75,7 +78,7 @@
     {
       "type": 1,
       "content": {
-        "json": "# Azure AI Platform — Health Dashboard\n\nPlatform-wide operational view of token consumption, request throughput, and latency percentiles across all layers. Use this workbook alongside the **Backend Routing Report** (circuit-breaker / failover) and the **End-to-End Trace** (per-request waterfall drill-down).\n\n| Section | What it answers |\n|---|---|\n| **Token Usage** | How many tokens per minute is the platform consuming? Which LOB is spending the most? Am I approaching Foundry's shared 1K TPM primary cap? |\n| **Request Rate** | How many requests/minute is the platform handling in total, and how is that load split across LOBs? |\n| **Latency Percentiles per Layer** | Where is the latency sitting — App Gateway WAF, APIM policy overhead, or Foundry inference? What is the P50/P95/P99 spread for each layer? |\n\n**Foundry primary shared cap: 1 000 TPM** (East US).  When the platform-wide TPM line approaches 1 000, expect circuit-breaker trips and failover to secondary (West US, 30K TPM). Correlate with the Backend Routing Report."
+        "json": "# Azure AI Platform — Health Dashboard\n\nPlatform-wide operational view of token consumption, request throughput, and latency percentiles across all layers. Use this workbook alongside the **Backend Routing Report** and the **End-to-End Trace**.\n\n| Section | What it answers |\n|---|---|\n| **Token Usage** | How many tokens per minute is the platform consuming, and which subscription generates the load? |\n| **Request Rate** | How many requests per minute is the platform handling and how is load split across subscriptions? |\n| **Latency Percentiles per Layer** | Is latency in App Gateway, APIM, or Foundry? |\n\nFoundry capacity is model- and region-specific and is declared in `infrastructure/model-portfolio.json`. Correlate throttling and secondary routing with the Backend Routing Report."
       },
       "name": "ph-header"
     },
@@ -83,7 +86,7 @@
     {
       "type": 1,
       "content": {
-        "json": "## Token Usage\n\nTokens per minute extracted from `Response-X-Tokens-Used` captured in `AppRequests` via APIM diagnostics. Requires the `azure-openai-emit-token-metric` policy (active after `azd provision`).\n\n**Product tier TPM caps:** Bronze 500 · Silver 5 000 · Gold 5 500. **Foundry primary pool: 1 000 TPM total** (shared across all subscriptions). When stacked bars reach ~1 000 combined, expect primary Foundry 429s and circuit-breaker failover to secondary."
+        "json": "## Token Usage\n\nTokens per minute extracted from `Response-X-Tokens-Used` captured in `AppRequests` via APIM diagnostics after `azd provision`.\n\n**Product tier TPM caps:** Bronze 500 · Silver 1 000 · Gold 2 000. Foundry capacity is model- and region-specific; compare traffic with the deployed portfolio and Backend Routing Report."
       },
       "name": "ph-section-tpm"
     },
@@ -92,7 +95,7 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "let sub_filter  = \"{SubscriptionName}\";\nlet bucket_secs = totimespan(\"{Granularity}\") / 1s;\nAppRequests\n| where TimeGenerated {TimeRange}\n| extend sub      = tostring(Properties[\"Subscription Name\"])\n| extend totalTok = toint(Properties[\"Response-X-Tokens-Used\"])\n| where isnotempty(sub) and totalTok > 0\n| where sub_filter == \"value:all\" or sub == sub_filter\n| summarize BucketTokens = sum(totalTok) by bin(TimeGenerated, {Granularity}), sub\n| extend TPM = round(toreal(BucketTokens) / max_of(toreal(bucket_secs) / 60.0, 1.0), 1)\n| project TimeGenerated, Subscription = sub, TPM\n| sort by TimeGenerated asc",
+        "query": "let sub_filter = dynamic([{SubscriptionName}]);\nlet bucket_secs = totimespan(\"{Granularity}\") / 1s;\nAppRequests\n| where TimeGenerated {TimeRange}\n| extend sub      = tostring(Properties[\"Subscription Name\"])\n| extend totalTok = toint(Properties[\"Response-X-Tokens-Used\"])\n| where isnotempty(sub) and totalTok > 0\n| where array_length(sub_filter) == 0 or tostring(sub_filter[0]) == \"value:all\" or sub in~ (sub_filter)\n| summarize BucketTokens = sum(totalTok) by bin(TimeGenerated, {Granularity}), sub\n| extend TPM = round(toreal(BucketTokens) / max_of(toreal(bucket_secs) / 60.0, 1.0), 1)\n| project TimeGenerated, Subscription = sub, TPM\n| sort by TimeGenerated asc",
         "size": 0,
         "title": "TPM over time — stacked by LOB subscription (tokens/min normalised to bucket width)",
         "showQuery": true,
@@ -127,9 +130,9 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "let sub_filter  = \"{SubscriptionName}\";\nlet bucket_secs = totimespan(\"{Granularity}\") / 1s;\nAppRequests\n| where TimeGenerated {TimeRange}\n| extend sub = tostring(Properties[\"Subscription Name\"])\n| where isnotempty(sub)\n| where sub_filter == \"value:all\" or sub == sub_filter\n| summarize BucketRequests = count() by bin(TimeGenerated, {Granularity})\n| extend RPM = round(toreal(BucketRequests) / max_of(toreal(bucket_secs) / 60.0, 1.0), 1)\n| project TimeGenerated, ['Requests/min'] = RPM\n| sort by TimeGenerated asc",
+        "query": "let sub_filter = dynamic([{SubscriptionName}]);\nlet bucket_secs = totimespan(\"{Granularity}\") / 1s;\nAppRequests\n| where TimeGenerated {TimeRange}\n| extend sub = tostring(Properties[\"Subscription Name\"])\n| where isnotempty(sub)\n| where array_length(sub_filter) == 0 or tostring(sub_filter[0]) == \"value:all\" or sub in~ (sub_filter)\n| summarize BucketRequests = count() by bin(TimeGenerated, {Granularity})\n| extend RPM = round(toreal(BucketRequests) / max_of(toreal(bucket_secs) / 60.0, 1.0), 1)\n| project TimeGenerated, ['Requests/min'] = RPM\n| sort by TimeGenerated asc",
         "size": 0,
-        "title": "Platform RPM — total requests/min (use Subscription filter above to isolate a LOB)",
+        "title": "Platform RPM — total requests/min for selected subscriptions",
         "showQuery": true,
         "queryType": 0,
         "resourceType": "microsoft.operationalinsights/workspaces",
@@ -154,9 +157,9 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "let sub_filter  = \"{SubscriptionName}\";\nlet bucket_secs = totimespan(\"{Granularity}\") / 1s;\nAppRequests\n| where TimeGenerated {TimeRange}\n| extend sub = tostring(Properties[\"Subscription Name\"])\n| where isnotempty(sub)\n| where sub_filter == \"value:all\" or sub == sub_filter\n| summarize BucketRequests = count() by bin(TimeGenerated, {Granularity}), sub\n| extend RPM = round(toreal(BucketRequests) / max_of(toreal(bucket_secs) / 60.0, 1.0), 1)\n| project TimeGenerated, Subscription = sub, RPM\n| sort by TimeGenerated asc",
+        "query": "let sub_filter = dynamic([{SubscriptionName}]);\nlet bucket_secs = totimespan(\"{Granularity}\") / 1s;\nAppRequests\n| where TimeGenerated {TimeRange}\n| extend sub = tostring(Properties[\"Subscription Name\"])\n| where isnotempty(sub)\n| where array_length(sub_filter) == 0 or tostring(sub_filter[0]) == \"value:all\" or sub in~ (sub_filter)\n| summarize BucketRequests = count() by bin(TimeGenerated, {Granularity}), sub\n| extend RPM = round(toreal(BucketRequests) / max_of(toreal(bucket_secs) / 60.0, 1.0), 1)\n| project TimeGenerated, Subscription = sub, RPM\n| sort by TimeGenerated asc",
         "size": 0,
-        "title": "RPM by LOB subscription — stacked area (use Subscription filter above to isolate one LOB)",
+        "title": "RPM by LOB subscription — stacked area for selected subscriptions",
         "showQuery": true,
         "queryType": 0,
         "resourceType": "microsoft.operationalinsights/workspaces",
@@ -180,7 +183,7 @@
     {
       "type": 1,
       "content": {
-        "json": "## Latency Percentiles per Layer\n\nNine time-series lines: **P50 · P95 · P99** for each of the three platform layers. Sources from `ApiManagementGatewayLogs` (low ingestion lag, ~30 s) joined to `AGWAccessLogs` on time bucket.\n\n| Layer | Colour | Source field | Healthy P99 |\n|---|---|---|---|\n| **App Gateway** | 🔵 Blue | `AGWAccessLogs.TimeTaken × 1000` | < 200 ms (WAF + TLS) |\n| **APIM overhead** | 🟠 Orange | `TotalTime − BackendTime` | < 100 ms |\n| **Foundry inference** | 🟢 Green | `BackendTime` | < 3 000 ms (gpt-4o-mini) · < 8 000 ms (o1) |\n\n**What a wide P50→P99 spread means:**\n- Foundry: bimodal request mix (cache hits vs cold inference) or failover latency (+300–500 ms for West US secondary)\n- APIM: occasional synchronous policy stall (semantic cache miss storm, Key Vault lookup)\n- App GW: WAF rule triggering on some requests or TLS renegotiation"
+        "json": "## Latency Percentiles per Layer\n\nNine time-series lines: **P50 · P95 · P99** for each of the three platform layers. Sources from `ApiManagementGatewayLogs` joined to `AGWAccessLogs` on time bucket.\n\n| Layer | Colour | Source field | Healthy P99 |\n|---|---|---|---|\n| **App Gateway** | 🔵 Blue | `AGWAccessLogs.TimeTaken × 1000` | < 200 ms (WAF + TLS) |\n| **APIM overhead** | 🟠 Orange | `TotalTime − BackendTime` | < 100 ms |\n| **Foundry inference** | 🟢 Green | `BackendTime` | Compare by selected model and region |\n\n**What a wide P50→P99 spread means:**\n- Foundry: request or model mix has different latency, or traffic moved to the secondary region\n- APIM: occasional policy or authentication stall\n- App Gateway: WAF rule triggering on some requests or TLS renegotiation"
       },
       "name": "ph-section-latency"
     },

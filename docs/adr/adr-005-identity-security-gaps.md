@@ -39,22 +39,19 @@ set on both AIServices accounts so key-based auth is disabled at the platform le
 
 ---
 
-### Gap 2 — Identity Logging at APIM (✅ Compliant, No Action)
+### Gap 2 — Identity Logging at APIM (⚠️ Partial)
 
 **Finding:** Microsoft guidance requires the gateway to log the requesting client
 and user identities on every call so that audit trails can be tied back to a specific
 LOB, even though all traffic flows through a single MSI to Foundry.
 
-**Current state:** `policies/apim/pci-dss-audit-logging.xml` captures:
-- `pci-audit-sub-id` — APIM subscription ID (the per-LOB identity unit)
-- `pci-audit-user-id` — JWT `sub` claim (Entra user or service principal OID)
-- `pci-audit-appid` — JWT `appid` claim (the calling application's Entra client ID)
-- `pci-audit-client-ip` — caller IP address
+**Current state:** APIM gateway diagnostics capture subscription-level identity,
+request metadata, status, and routing information in Log Analytics with 90-day
+retention. The removed custom audit stream is no longer present, so per-user JWT
+claim extraction is not claimed by this platform.
 
-All events are written to Log Analytics (395-day retention) satisfying PCI DSS Req 10
-and the CAF observability requirement.
-
-**Decision:** Already compliant. No action required.
+**Decision:** Treat gateway metadata as operational telemetry. Workloads that require
+per-user auditability must preserve validated Entra identity in their own audit system.
 
 ---
 
@@ -79,8 +76,7 @@ cost-efficient.
 1. APIM subscription key is the only auth credential LOBs receive — they cannot
    reach Foundry directly.
 2. APIM policies enforce model allowlists per product tier (Bronze/Silver/Gold).
-3. PCI DSS Gold tier has a dedicated product with stricter policies and manual
-   subscription approval.
+3. Gold-tier subscriptions require manual approval and are limited to one per owner.
 4. All requests are logged with caller identity (see Gap 2).
 
 **Decision:** Accepted tradeoff. Re-evaluate if a Gold LOB requires agent state
@@ -93,67 +89,24 @@ See ADR-002 §"Option B" for the provisioning pattern.
 
 ---
 
-### Gap 4 — Semantic Cache Key Not Identity-Scoped (🔴 FIXED — April 2026)
+### Gap 4 — Response Caching (Not Deployed)
 
-**Finding:** Microsoft guidance explicitly states:
-
-> "make sure the identity of the requestor is considered in the cache logic.
->  Do not return cached results for identities that are not authorized to
->  receive that data."
-
-**Previous state (vulnerable):** `policies/apim/semantic-caching.xml` computed the
-cache key as a SHA-256 hash of the prompt text only:
-
-```csharp
-// BEFORE — prompt hash only (no identity scope)
-var hashBytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(prompt));
-```
-
-This meant that if two different LOB subscribers sent the same prompt text, the second
-subscriber would receive the first subscriber's cached response — including any
-sensitive business context embedded in that response.
-
-**Fix applied:** Cache key now includes `context.Subscription.Id` as a prefix before
-hashing, ensuring that each subscriber's cache entries are entirely isolated:
-
-```csharp
-// AFTER — subscription-scoped prompt hash
-var subscriptionId = context.Subscription.Id ?? "anonymous";
-var raw = subscriptionId + "|" + prompt;
-var hashBytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(raw));
-```
-
-**Scoping strategy rationale:**
-- `context.Subscription.Id` (chosen): Maximum isolation — each LOB has its own
-  cache namespace. Cache hit rate is lower but no cross-subscriber leakage is
-  possible under any scenario.
-- `context.Product.Id` (alternative): Tier-level isolation — all Bronze subscribers
-  share a cache, all Silver subscribers share a cache. Higher hit rate, but relies
-  on the assumption that tier-mates never have confidential prompts that should not
-  be seen by other tier-mates. Rejected as too weak a default.
-
-**PCI DSS note:** The existing `pci-dss-cardholder-data-protection.xml` policy
-already instructs: "Do NOT apply semantic-caching.xml to any PCI-scoped API
-operation." This instruction is unchanged. Gold/PCI endpoints must not have
-the semantic caching policy applied at all.
-
-**Status:** ✅ Fixed in `policies/apim/semantic-caching.xml`  
-**Deploy command:** `azd provision` (APIM policies are deployed via Bicep)
+The platform does not cache prompts or model responses. This avoids cross-subscription
+data-isolation risk and keeps APIM behavior explicit. Any future caching design must
+scope entries by subscription identity, define retention behavior, and be implemented
+in the Bicep-owned inline policies before documentation claims it.
 
 ---
 
-### Gap 5 — Entra Agent ID Inventory for Gold/PCI (🟡 Open — Governance)
+### Gap 5 — Entra Agent ID Inventory (🟡 Open — Governance)
 
 **Finding:** Microsoft CAF AI security guidance recommends maintaining an inventory
 of all agents using [Entra Agent ID](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/workload-id-agent-id-overview).
 This provides visibility into which agents exist, which users/apps are running them,
 and enables conditional access policies to restrict which agents can be registered.
 
-**Current state:** Foundry agents can be created by any developer with the Foundry
-`Azure AI Developer` role (granted via `developerObjectIds` in
-`infrastructure/bicep/foundry-hub-project.bicep`).  There is no Entra Agent ID
-registration requirement, no catalog of running agents, and no conditional access
-policy restricting agent creation.
+**Current state:** The platform does not grant individual developer access to Foundry.
+There is no Entra Agent ID registration requirement or catalog of running agents.
 
 **Risk:** Without an agent inventory, a compromised developer credential could be
 used to create a rogue agent that exfiltrates data through tool calls, with no
@@ -162,14 +115,48 @@ platform-level detection.
 **Recommended remediation:**
 1. Enable Entra Agent ID in the Foundry project settings (requires Entra P2).
 2. Add a Conditional Access policy that requires agent registrations to be approved
-   by the Security team for Gold-tier users.
-3. Export the agent inventory monthly to Log Analytics for PCI DSS Req 12 artifact.
+  by the Security team for privileged users.
+3. Export the agent inventory monthly to Log Analytics for governance review.
 
-**Priority:** Medium — required before the first Gold LOB goes to production with
-autonomous agents making tool calls against payment systems.
+**Priority:** Medium — required before privileged LOBs use autonomous agents with
+sensitive downstream tool access.
 
 **Owner:** Identity & Access Management team  
 **Target:** Gold tier GA date
+
+---
+
+### Gap 6 — Deployment Data-Plane Network Access (⚠️ Accepted Deployment Boundary)
+
+**Finding:** The Function deployment storage account and certificate Key Vault have
+public network routing enabled. They are not anonymous or key-authenticated public
+services, but their data-plane endpoints are reachable from public networks.
+
+**Current state:** Two deployment operations originate outside the platform VNet:
+
+1. `azd deploy` uploads the Function package from a developer workstation or hosted
+   CI runner to the Flex Consumption deployment container.
+2. `Microsoft.Resources/deploymentScripts` runs an Azure-managed container that
+   creates or verifies the default Key Vault certificate during provisioning.
+
+**Compensating controls:**
+
+- Storage explicitly disables shared-key access, anonymous blob access, and
+  cross-tenant replication, defaults clients to OAuth, and grants the deploying
+  principal only Storage Blob Data Contributor.
+- The Function runtime uses its system-assigned identity for blob, queue, and table
+  access; no storage connection-string secret is configured.
+- Key Vault uses RBAC, purge protection, and soft delete. The certificate deployment
+  script has a dedicated user-assigned identity with only Key Vault Certificates
+  Officer, while Application Gateway receives only Key Vault Certificate User.
+- Both deployment paths are declared and reconciled through Bicep/azd; no manual
+  firewall or credential changes are permitted.
+
+**Decision:** Retain public routing for these two deployment paths until deployments
+run from a self-hosted VNet-connected agent and the certificate deployment script is
+attached to a private subnet. At that point, set both resources to deny public
+network access and remove the policy exception. Public routing is not an exception
+to authentication: all data access remains Entra RBAC-only.
 
 ---
 
@@ -178,20 +165,15 @@ autonomous agents making tool calls against payment systems.
 | Gap | Severity | Status | File(s) Affected |
 |-----|----------|--------|-----------------|
 | 1 — APIM MSI to Foundry | ✅ Compliant | No action | `foundry-apim-rbac.bicep` |
-| 2 — Identity logging | ✅ Compliant | No action | `pci-dss-audit-logging.xml` |
+| 2 — Identity logging | ⚠️ Partial | Gateway metadata only | `apim-gateway.bicep` |
 | 3 — Per-LOB Foundry routing | ⚠️ Accepted | Revisit at Gold GA | `adr-002-foundry-integration.md` |
-| 4 — Semantic cache identity scope | 🔴 Security | **Fixed** | `semantic-caching.xml` |
+| 4 — Response caching | ✅ Not exposed | Not deployed | `apim-gateway.bicep` |
 | 5 — Entra Agent ID inventory | 🟡 Governance | Open | Entra + Foundry config |
+| 6 — Deployment data-plane network access | ⚠️ Accepted | Compensating controls | `supporting-infra.bicep` |
 
 ---
 
 ## Consequences
 
-- Gap 4 fix reduces semantic cache hit rate (cache is no longer shared across
-  subscribers with identical prompts). Token cost savings may decrease from the
-  projected 20–40% to a lower baseline depending on per-LOB prompt diversity.
-  This is an acceptable cost for eliminating data leakage risk.
-  
-- If cache efficiency becomes a measurable concern after deployment, the scoping
-  strategy can be relaxed to `context.Product.Id` (tier-level) through a controlled
-  change with Security Architecture sign-off.
+- Response caching remains disabled unless a subscription-scoped design receives
+  security review and is implemented declaratively in Bicep.

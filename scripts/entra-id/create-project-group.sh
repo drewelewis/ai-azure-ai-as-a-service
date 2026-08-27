@@ -103,7 +103,7 @@ echo "Dev Lead ID:  $DEV_LEAD_OBJECT_ID"
 echo ""
 echo "Next Steps:"
 echo "1. Assign group to Foundry project RBAC"
-echo "2. Share group ID with ServiceNow automation"
+echo "2. Record the group ID in the project configuration"
 echo "3. Dev Lead can manage members via Azure Portal"
 
 # Save to JSON for automation

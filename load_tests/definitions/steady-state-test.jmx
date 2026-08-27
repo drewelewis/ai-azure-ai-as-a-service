@@ -5,8 +5,8 @@
 
   PURPOSE
   =======
-  Simulates realistic steady-state usage across all four LOB subscriptions
-  (Bronze + Silver × 2 + Gold) for 1 hour.  Designed to:
+  Simulates realistic steady-state usage across all eight LOB use-case
+  subscriptions for 1 hour. Designed to:
     • Generate continuous, gap-free data in Azure Monitor 5-minute bins
       (~20 data points per bin per subscription)
     • Stay well under all APIM product TPM/RPM caps — no throttling or failover
@@ -21,9 +21,9 @@
 
   TEST SUITES (all run in parallel, 3600s)
   =========================================
-  Suite 1  [BranchAdvisor]       2 threads, 30s think, 3600s, max_tokens=1  → ~4 RPM,  ~20 TPM   (Bronze cap: 500)  — gpt-4o-mini
-  Suite 2  [AMLScreening]        2 threads, 30s think, 3600s, max_tokens=1  → ~4 RPM,  ~20 TPM   (Silver cap: 1000) — gpt-4o-mini
-  Suite 3  [CreditUnderwriting]  2 threads, 30s think, 3600s, max_tokens=1  → ~4 RPM,  ~20 TPM   (Silver cap: 1000) — gpt-4o-mini
+  Suite 1  [BronzeClient]       2 threads, 30s think, 3600s, max_tokens=1  → ~4 RPM,  ~20 TPM   (Bronze cap: 500)  — gpt-4o-mini
+  Suite 2  [SilverClient]        2 threads, 30s think, 3600s, max_tokens=1  → ~4 RPM,  ~20 TPM   (Silver cap: 1000) — gpt-4o-mini
+  Suite 3  [SilverClient2]  2 threads, 30s think, 3600s, max_tokens=1  → ~4 RPM,  ~20 TPM   (Silver cap: 1000) — gpt-4o-mini
   Suite 4  [InvestmentPlatform]  2 threads, 30s think, 3600s, max_tokens=1  → ~4 RPM,  ~20 TPM   (Gold cap:  2000) — gpt-4o-mini
   Suite 5  [AI Research]         2 threads, 30s think, 3600s, max_tokens=1  → ~4 RPM,  ~20 TPM   (Bronze cap: 500)  — phi-4-mini
   Suite 6  [Phi-4 Baseline]      2 threads, 30s think, 3600s, max_tokens=1  → ~4 RPM,  ~20 TPM   (Bronze cap: 500)  — phi-4
@@ -49,10 +49,14 @@
   ============================================
     APIM_HOSTNAME  = agw-contoso-ai-primary.eastus.cloudapp.azure.com
     API_VERSION    = 2024-10-21
-    BRONZE_KEY     = <Branch Advisor subscription key>        (app-branch-advisor)
-    SILVER_KEY     = <AML Screening subscription key>         (app-aml-screening)
-    SILVER_KEY_2   = <Credit Underwriting subscription key>   (app-credit-underwriting)
-    GOLD_KEY       = <Investment Platform subscription key>   (Investment-Platform)
+    CONSUMER_CUSTOMER_SERVICE_KEY       = <consumer-customer-service key>
+    CONSUMER_ACCOUNT_OPENING_KEY        = <consumer-account-opening key>
+    COMMERCIAL_RELATIONSHIP_MANAGER_KEY = <commercial-relationship-manager key>
+    COMMERCIAL_CREDIT_MEMO_KEY          = <commercial-credit-memo key>
+    CIB_DEAL_RESEARCH_KEY               = <cib-deal-research key>
+    CIB_DUE_DILIGENCE_KEY               = <cib-due-diligence key>
+    WEALTH_PORTFOLIO_COMMENTARY_KEY     = <wealth-portfolio-commentary key>
+    WEALTH_ADVISOR_COPILOT_KEY          = <wealth-advisor-copilot key>
 
   Concurrent execution:
     This test uses ALT test ID 'steady-state-test'.
@@ -79,24 +83,44 @@
             <stringProp name="Argument.value">${__P(API_VERSION,2024-10-21)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
-          <elementProp name="BRONZE_KEY" elementType="Argument">
-            <stringProp name="Argument.name">BRONZE_KEY</stringProp>
-            <stringProp name="Argument.value">${__P(BRONZE_KEY,)}</stringProp>
+          <elementProp name="CONSUMER_CUSTOMER_SERVICE_KEY" elementType="Argument">
+            <stringProp name="Argument.name">CONSUMER_CUSTOMER_SERVICE_KEY</stringProp>
+            <stringProp name="Argument.value">${__P(CONSUMER_CUSTOMER_SERVICE_KEY,)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
-          <elementProp name="SILVER_KEY" elementType="Argument">
-            <stringProp name="Argument.name">SILVER_KEY</stringProp>
-            <stringProp name="Argument.value">${__P(SILVER_KEY,)}</stringProp>
+          <elementProp name="CONSUMER_ACCOUNT_OPENING_KEY" elementType="Argument">
+            <stringProp name="Argument.name">CONSUMER_ACCOUNT_OPENING_KEY</stringProp>
+            <stringProp name="Argument.value">${__P(CONSUMER_ACCOUNT_OPENING_KEY,)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
-          <elementProp name="SILVER_KEY_2" elementType="Argument">
-            <stringProp name="Argument.name">SILVER_KEY_2</stringProp>
-            <stringProp name="Argument.value">${__P(SILVER_KEY_2,)}</stringProp>
+          <elementProp name="COMMERCIAL_RELATIONSHIP_MANAGER_KEY" elementType="Argument">
+            <stringProp name="Argument.name">COMMERCIAL_RELATIONSHIP_MANAGER_KEY</stringProp>
+            <stringProp name="Argument.value">${__P(COMMERCIAL_RELATIONSHIP_MANAGER_KEY,)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
-          <elementProp name="GOLD_KEY" elementType="Argument">
-            <stringProp name="Argument.name">GOLD_KEY</stringProp>
-            <stringProp name="Argument.value">${__P(GOLD_KEY,)}</stringProp>
+          <elementProp name="COMMERCIAL_CREDIT_MEMO_KEY" elementType="Argument">
+            <stringProp name="Argument.name">COMMERCIAL_CREDIT_MEMO_KEY</stringProp>
+            <stringProp name="Argument.value">${__P(COMMERCIAL_CREDIT_MEMO_KEY,)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="CIB_DEAL_RESEARCH_KEY" elementType="Argument">
+            <stringProp name="Argument.name">CIB_DEAL_RESEARCH_KEY</stringProp>
+            <stringProp name="Argument.value">${__P(CIB_DEAL_RESEARCH_KEY,)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="CIB_DUE_DILIGENCE_KEY" elementType="Argument">
+            <stringProp name="Argument.name">CIB_DUE_DILIGENCE_KEY</stringProp>
+            <stringProp name="Argument.value">${__P(CIB_DUE_DILIGENCE_KEY,)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="WEALTH_PORTFOLIO_COMMENTARY_KEY" elementType="Argument">
+            <stringProp name="Argument.name">WEALTH_PORTFOLIO_COMMENTARY_KEY</stringProp>
+            <stringProp name="Argument.value">${__P(WEALTH_PORTFOLIO_COMMENTARY_KEY,)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="WEALTH_ADVISOR_COPILOT_KEY" elementType="Argument">
+            <stringProp name="Argument.name">WEALTH_ADVISOR_COPILOT_KEY</stringProp>
+            <stringProp name="Argument.value">${__P(WEALTH_ADVISOR_COPILOT_KEY,)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
         </collectionProp>
@@ -181,7 +205,7 @@ props.put("embeddingLargeFailover",    new java.util.concurrent.atomic.AtomicInt
 log.info("[Counters] All per-subscription primary+failover counters initialised to 0.")
 
 // ── Key fallback: OS env → JMeter props ───────────────────────────────────────
-['BRONZE_KEY', 'SILVER_KEY', 'SILVER_KEY_2', 'GOLD_KEY', 'APIM_HOSTNAME', 'API_VERSION'].each { varName ->
+['CONSUMER_CUSTOMER_SERVICE_KEY', 'CONSUMER_ACCOUNT_OPENING_KEY', 'COMMERCIAL_RELATIONSHIP_MANAGER_KEY', 'COMMERCIAL_CREDIT_MEMO_KEY', 'CIB_DEAL_RESEARCH_KEY', 'CIB_DUE_DILIGENCE_KEY', 'WEALTH_PORTFOLIO_COMMENTARY_KEY', 'WEALTH_ADVISOR_COPILOT_KEY', 'APIM_HOSTNAME', 'API_VERSION'].each { varName ->
     def current = props.get(varName)
     if (current != null &amp;&amp; current.length() &gt; 0) {
         log.info("[Config] " + varName + " already set (len=" + current.length() + ")")
@@ -203,11 +227,11 @@ log.info("[Setup] Steady-state test ready. 8 thread groups (2 threads each, 30s 
       </hashTree>
 
       <!-- ================================================================= -->
-      <!-- Suite 1: Branch Advisor (Bronze) — 2 threads, 30s think, 3600s    -->
+      <!-- Suite 1: Bronze Client (Bronze) — 2 threads, 30s think, 3600s    -->
       <!-- ~4 RPM, ~40 TPM — well under Bronze 500 TPM / 60 RPM caps         -->
       <!-- ================================================================= -->
       <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup"
-                   testname="[Branch Advisor] Steady — gpt-4o-mini" enabled="true">
+                   testname="[Bronze Client] Steady — gpt-4o-mini" enabled="true">
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController"
                      guiclass="LoopControlPanel" testclass="LoopController">
@@ -222,11 +246,11 @@ log.info("[Setup] Steady-state test ready. 8 thread groups (2 threads each, 30s 
       </ThreadGroup>
       <hashTree>
         <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager"
-                       testname="Branch Advisor Auth + OWASP headers" enabled="true">
+                       testname="Bronze Client Auth + OWASP headers" enabled="true">
           <collectionProp name="HeaderManager.headers">
             <elementProp name="Ocp-Apim-Subscription-Key" elementType="Header">
               <stringProp name="Header.name">Ocp-Apim-Subscription-Key</stringProp>
-              <stringProp name="Header.value">${BRONZE_KEY}</stringProp>
+              <stringProp name="Header.value">${CONSUMER_CUSTOMER_SERVICE_KEY}</stringProp>
             </elementProp>
             <elementProp name="Content-Type" elementType="Header">
               <stringProp name="Header.name">Content-Type</stringProp>
@@ -252,7 +276,7 @@ log.info("[Setup] Steady-state test ready. 8 thread groups (2 threads each, 30s 
         <hashTree/>
 
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy"
-                          testname="[Branch Advisor] POST chat/completions"
+                          testname="[Bronze Client] POST chat/completions"
                           enabled="true">
           <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
           <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
@@ -278,7 +302,7 @@ log.info("[Setup] Steady-state test ready. 8 thread groups (2 threads each, 30s 
             <collectionProp name="Asserion.test_strings">
               <stringProp name="49586">200</stringProp>
             </collectionProp>
-            <stringProp name="Assertion.custom_message">Branch Advisor must see 200 — no throttling expected at steady-state load</stringProp>
+            <stringProp name="Assertion.custom_message">Bronze Client must see 200 — no throttling expected at steady-state load</stringProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
             <boolProp name="Assertion.assume_success">false</boolProp>
             <intProp name="Assertion.test_type">8</intProp>
@@ -297,7 +321,7 @@ log.info("[Setup] Steady-state test ready. 8 thread groups (2 threads each, 30s 
           <hashTree/>
 
           <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor"
-                               testname="Track Branch Advisor backend counter" enabled="true">
+                               testname="Track Bronze Client backend counter" enabled="true">
             <stringProp name="scriptLanguage">groovy</stringProp>
             <stringProp name="script">
 def region = vars.get("backendRegion") ?: "primary"
@@ -313,11 +337,11 @@ if (region.contains("secondary")) {
       </hashTree>
 
       <!-- ================================================================= -->
-      <!-- Suite 2: AML Screening (Silver) — 2 threads, 30s think, 3600s     -->
+      <!-- Suite 2: Silver Client (Silver) — 2 threads, 30s think, 3600s     -->
       <!-- ~4 RPM, ~40 TPM — well under Silver 1000 TPM / 120 RPM caps       -->
       <!-- ================================================================= -->
       <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup"
-                   testname="[AML Screening] Steady — gpt-4o-mini" enabled="true">
+                   testname="[Silver Client] Steady — gpt-4o-mini" enabled="true">
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController"
                      guiclass="LoopControlPanel" testclass="LoopController">
@@ -332,11 +356,11 @@ if (region.contains("secondary")) {
       </ThreadGroup>
       <hashTree>
         <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager"
-                       testname="AML Screening Auth + OWASP headers" enabled="true">
+                       testname="Silver Client Auth + OWASP headers" enabled="true">
           <collectionProp name="HeaderManager.headers">
             <elementProp name="Ocp-Apim-Subscription-Key" elementType="Header">
               <stringProp name="Header.name">Ocp-Apim-Subscription-Key</stringProp>
-              <stringProp name="Header.value">${SILVER_KEY}</stringProp>
+              <stringProp name="Header.value">${CONSUMER_ACCOUNT_OPENING_KEY}</stringProp>
             </elementProp>
             <elementProp name="Content-Type" elementType="Header">
               <stringProp name="Header.name">Content-Type</stringProp>
@@ -361,7 +385,7 @@ if (region.contains("secondary")) {
         <hashTree/>
 
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy"
-                          testname="[AML Screening] POST chat/completions"
+                          testname="[Silver Client] POST chat/completions"
                           enabled="true">
           <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
           <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
@@ -387,7 +411,7 @@ if (region.contains("secondary")) {
             <collectionProp name="Asserion.test_strings">
               <stringProp name="49586">200</stringProp>
             </collectionProp>
-            <stringProp name="Assertion.custom_message">AML Screening must see 200 — no throttling expected at steady-state load</stringProp>
+            <stringProp name="Assertion.custom_message">Silver Client must see 200 — no throttling expected at steady-state load</stringProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
             <boolProp name="Assertion.assume_success">false</boolProp>
             <intProp name="Assertion.test_type">8</intProp>
@@ -406,7 +430,7 @@ if (region.contains("secondary")) {
           <hashTree/>
 
           <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor"
-                               testname="Track AML Screening backend counter" enabled="true">
+                               testname="Track Silver Client backend counter" enabled="true">
             <stringProp name="scriptLanguage">groovy</stringProp>
             <stringProp name="script">
 def region = vars.get("backendRegion") ?: "primary"
@@ -422,11 +446,11 @@ if (region.contains("secondary")) {
       </hashTree>
 
       <!-- ================================================================= -->
-      <!-- Suite 3: Credit Underwriting (Silver) — 2 threads, 30s think, 3600s -->
+      <!-- Suite 3: Silver Client 2 (Silver) — 2 threads, 30s think, 3600s -->
       <!-- ~4 RPM, ~40 TPM — well under Silver 1000 TPM / 120 RPM caps         -->
       <!-- ================================================================= -->
       <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup"
-                   testname="[Credit Underwriting] Steady — gpt-4o-mini" enabled="true">
+                   testname="[Silver Client 2] Steady — gpt-4o-mini" enabled="true">
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController"
                      guiclass="LoopControlPanel" testclass="LoopController">
@@ -441,11 +465,11 @@ if (region.contains("secondary")) {
       </ThreadGroup>
       <hashTree>
         <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager"
-                       testname="Credit Underwriting Auth + OWASP headers" enabled="true">
+                       testname="Silver Client 2 Auth + OWASP headers" enabled="true">
           <collectionProp name="HeaderManager.headers">
             <elementProp name="Ocp-Apim-Subscription-Key" elementType="Header">
               <stringProp name="Header.name">Ocp-Apim-Subscription-Key</stringProp>
-              <stringProp name="Header.value">${SILVER_KEY_2}</stringProp>
+              <stringProp name="Header.value">${COMMERCIAL_RELATIONSHIP_MANAGER_KEY}</stringProp>
             </elementProp>
             <elementProp name="Content-Type" elementType="Header">
               <stringProp name="Header.name">Content-Type</stringProp>
@@ -470,7 +494,7 @@ if (region.contains("secondary")) {
         <hashTree/>
 
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy"
-                          testname="[Credit Underwriting] POST chat/completions"
+                          testname="[Silver Client 2] POST chat/completions"
                           enabled="true">
           <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
           <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
@@ -496,7 +520,7 @@ if (region.contains("secondary")) {
             <collectionProp name="Asserion.test_strings">
               <stringProp name="49586">200</stringProp>
             </collectionProp>
-            <stringProp name="Assertion.custom_message">Credit Underwriting must see 200 — no throttling expected at steady-state load</stringProp>
+            <stringProp name="Assertion.custom_message">Silver Client 2 must see 200 — no throttling expected at steady-state load</stringProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
             <boolProp name="Assertion.assume_success">false</boolProp>
             <intProp name="Assertion.test_type">8</intProp>
@@ -515,7 +539,7 @@ if (region.contains("secondary")) {
           <hashTree/>
 
           <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor"
-                               testname="Track Credit Underwriting backend counter" enabled="true">
+                               testname="Track Silver Client 2 backend counter" enabled="true">
             <stringProp name="scriptLanguage">groovy</stringProp>
             <stringProp name="script">
 def region = vars.get("backendRegion") ?: "primary"
@@ -531,11 +555,11 @@ if (region.contains("secondary")) {
       </hashTree>
 
       <!-- ================================================================= -->
-      <!-- Suite 4: Investment Platform (Gold) — 2 threads, 30s think, 3600s  -->
+      <!-- Suite 4: Gold Client (Gold) — 2 threads, 30s think, 3600s  -->
       <!-- ~4 RPM, ~40 TPM — well under Gold 2000 TPM / 240 RPM caps          -->
       <!-- ================================================================= -->
       <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup"
-                   testname="[Investment Platform] Steady — gpt-4o-mini" enabled="true">
+                   testname="[Gold Client] Steady — gpt-4o-mini" enabled="true">
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController"
                      guiclass="LoopControlPanel" testclass="LoopController">
@@ -550,11 +574,11 @@ if (region.contains("secondary")) {
       </ThreadGroup>
       <hashTree>
         <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager"
-                       testname="Investment Platform Auth + OWASP headers" enabled="true">
+                       testname="Gold Client Auth + OWASP headers" enabled="true">
           <collectionProp name="HeaderManager.headers">
             <elementProp name="Ocp-Apim-Subscription-Key" elementType="Header">
               <stringProp name="Header.name">Ocp-Apim-Subscription-Key</stringProp>
-              <stringProp name="Header.value">${GOLD_KEY}</stringProp>
+              <stringProp name="Header.value">${COMMERCIAL_CREDIT_MEMO_KEY}</stringProp>
             </elementProp>
             <elementProp name="Content-Type" elementType="Header">
               <stringProp name="Header.name">Content-Type</stringProp>
@@ -579,7 +603,7 @@ if (region.contains("secondary")) {
         <hashTree/>
 
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy"
-                          testname="[Investment Platform] POST chat/completions"
+                          testname="[Gold Client] POST chat/completions"
                           enabled="true">
           <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
           <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
@@ -605,7 +629,7 @@ if (region.contains("secondary")) {
             <collectionProp name="Asserion.test_strings">
               <stringProp name="49586">200</stringProp>
             </collectionProp>
-            <stringProp name="Assertion.custom_message">Investment Platform must see 200 — no throttling expected at steady-state load</stringProp>
+            <stringProp name="Assertion.custom_message">Gold Client must see 200 — no throttling expected at steady-state load</stringProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
             <boolProp name="Assertion.assume_success">false</boolProp>
             <intProp name="Assertion.test_type">8</intProp>
@@ -624,7 +648,7 @@ if (region.contains("secondary")) {
           <hashTree/>
 
           <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor"
-                               testname="Track Investment Platform backend counter" enabled="true">
+                               testname="Track Gold Client backend counter" enabled="true">
             <stringProp name="scriptLanguage">groovy</stringProp>
             <stringProp name="script">
 def region = vars.get("backendRegion") ?: "primary"
@@ -665,7 +689,7 @@ if (region.contains("secondary")) {
             <elementProp name="Ocp-Apim-Subscription-Key" elementType="Header">
               <stringProp name="Header.name">Ocp-Apim-Subscription-Key</stringProp>
               <!-- phi-4-mini is in the Bronze allowlist — no Silver key required -->
-              <stringProp name="Header.value">${BRONZE_KEY}</stringProp>
+              <stringProp name="Header.value">${CIB_DEAL_RESEARCH_KEY}</stringProp>
             </elementProp>
             <elementProp name="Content-Type" elementType="Header">
               <stringProp name="Header.name">Content-Type</stringProp>
@@ -777,7 +801,7 @@ if (region.contains("secondary")) {
             <elementProp name="Ocp-Apim-Subscription-Key" elementType="Header">
               <stringProp name="Header.name">Ocp-Apim-Subscription-Key</stringProp>
               <!-- phi-4 is in the Bronze allowlist -->
-              <stringProp name="Header.value">${BRONZE_KEY}</stringProp>
+              <stringProp name="Header.value">${CIB_DUE_DILIGENCE_KEY}</stringProp>
             </elementProp>
             <elementProp name="Content-Type" elementType="Header">
               <stringProp name="Header.name">Content-Type</stringProp>
@@ -888,7 +912,7 @@ if (region.contains("secondary")) {
             <elementProp name="Ocp-Apim-Subscription-Key" elementType="Header">
               <stringProp name="Header.name">Ocp-Apim-Subscription-Key</stringProp>
               <!-- text-embedding-3-small is in the Bronze allowlist -->
-              <stringProp name="Header.value">${BRONZE_KEY}</stringProp>
+              <stringProp name="Header.value">${WEALTH_PORTFOLIO_COMMENTARY_KEY}</stringProp>
             </elementProp>
             <elementProp name="Content-Type" elementType="Header">
               <stringProp name="Header.name">Content-Type</stringProp>
@@ -999,7 +1023,7 @@ if (region.contains("secondary")) {
             <elementProp name="Ocp-Apim-Subscription-Key" elementType="Header">
               <stringProp name="Header.name">Ocp-Apim-Subscription-Key</stringProp>
               <!-- text-embedding-3-large is Gold-tier only -->
-              <stringProp name="Header.value">${GOLD_KEY}</stringProp>
+              <stringProp name="Header.value">${WEALTH_ADVISOR_COPILOT_KEY}</stringProp>
             </elementProp>
             <elementProp name="Content-Type" elementType="Header">
               <stringProp name="Header.name">Content-Type</stringProp>
@@ -1145,10 +1169,10 @@ def embLStatus  = embLF  == 0 ? "PASS — all primary (expected)" : "INVESTIGATE
 def msg = """
 === STEADY STATE BASELINE RESULTS ===
 
-  [Branch Advisor]         total=${baTotal}  primary=${bap}  failover=${baf}  — ${baStatus}
-  [AML Screening]          total=${amlTotal}  primary=${amlp}  failover=${amlf}  — ${amlStatus}
-  [Credit Underwriting]    total=${cuTotal}  primary=${cup}  failover=${cuf}  — ${cuStatus}
-  [Investment Platform]    total=${ipTotal}  primary=${ipp}  failover=${ipf}  — ${ipStatus}
+  [Bronze Client]         total=${baTotal}  primary=${bap}  failover=${baf}  — ${baStatus}
+  [Silver Client]          total=${amlTotal}  primary=${amlp}  failover=${amlf}  — ${amlStatus}
+  [Silver Client 2]    total=${cuTotal}  primary=${cup}  failover=${cuf}  — ${cuStatus}
+  [Gold Client]    total=${ipTotal}  primary=${ipp}  failover=${ipf}  — ${ipStatus}
   [AI Research]            total=${phi4mTotal}  primary=${phi4mp}  failover=${phi4mf}  — ${phi4mStatus}  (phi-4-mini)
   [Phi-4 Baseline]         total=${phi4Total}  primary=${phi4p}  failover=${phi4f}  — ${phi4Status}  (phi-4)
   [Embedding Small]        total=${embSTotal}  primary=${embSP}  failover=${embSF}  — ${embSStatus}  (text-embedding-3-small)

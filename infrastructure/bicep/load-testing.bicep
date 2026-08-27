@@ -11,8 +11,8 @@
 targetScope = 'resourceGroup'
 
 param location string
-param prefix string
 param environment string
+param loadTestName string
 param tags object = {}
 
 @description('Resource ID of the VNet that contains snet-loadtest; required for Network Contributor RBAC')
@@ -22,7 +22,7 @@ param vnetId string
 param deployRbac bool = true
 
 resource loadTest 'Microsoft.LoadTestService/loadTests@2022-12-01' = {
-  name: 'lt-${prefix}-ai-${environment}'
+  name: loadTestName
   location: location
   tags: tags
   identity: {

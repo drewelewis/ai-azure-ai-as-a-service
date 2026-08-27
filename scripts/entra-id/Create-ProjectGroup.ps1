@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     Automates the creation of an Entra ID group with the Dev Lead as owner.
-    Used by ServiceNow automation when provisioning new AI projects.
+    Used by platform automation when provisioning new AI projects.
 
 .PARAMETER ProjectName
     Name of the AI Foundry project (e.g., "marketing-chatbot")
@@ -130,7 +130,7 @@ Write-Host "Owner:        $($devLead.DisplayName)"
 Write-Host "Members:      $($TeamMembers.Count + 1) total"
 Write-Host "`nNext Steps:"
 Write-Host "1. Assign group to Foundry project RBAC (Cognitive Services User)"
-Write-Host "2. Share group ID with ServiceNow automation"
+Write-Host "2. Record the group ID in the project configuration"
 Write-Host "3. Dev Lead can manage members via Entra ID or Portal"
 
 # Return group details as JSON for automation

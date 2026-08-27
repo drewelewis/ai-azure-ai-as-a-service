@@ -11,7 +11,7 @@ Instead of managing Azure OpenAI keys directly, you work through **Azure API Man
 ✅ Audit trails (all requests logged)  
 ✅ Simple auth (use your corporate identity)  
 
-> **What is token quota?** A *token* is roughly ¾ of a word. A short chat message might be 50 tokens; a 2-page document summary might be 4,000 tokens. Your subscription key is assigned a **Tier** (Bronze / Silver / Gold) that caps how many tokens per minute (TPM) and requests per minute (RPM) your team can send through the gateway. If you exceed the cap, the gateway returns HTTP 429 — back-off and retry. Your IT manager can increase the cap via ServiceNow. See [quota-management.md](../docs/playbooks/quota-management.md) for full details.
+> **What is token quota?** A *token* is roughly ¾ of a word. A short chat message might be 50 tokens; a 2-page document summary might be 4,000 tokens. Your subscription key is assigned a **Tier** (Bronze / Silver / Gold) that caps how many tokens per minute (TPM) and requests per minute (RPM) your team can send through the gateway. If you exceed the cap, the gateway returns HTTP 429 — back off and retry. The platform team reviews tier changes. See [quota-management.md](../docs/playbooks/quota-management.md) for details.
 
 ---
 
@@ -251,8 +251,8 @@ APIM Gateway (https://your-company-ai.azure-api.net)
     ↓ [APIM Policies:]
     ├─ Rate limiting (your team's token quota)
     ├─ Request logging (audit trail)
-    ├─ Semantic caching (save on tokens)
-    ├─ Auth validation (Managed Identity check)
+    ├─ Subscription-key authentication
+    ├─ Managed identity authentication to Foundry
     ↓
 Azure OpenAI / Foundry Model
     ↓ [Response logged to Application Insights]
@@ -272,7 +272,7 @@ Your IT manager set up dashboards showing:
 - **Performance (latency)**
 - **Errors & failures**
 
-Check [Grafana dashboard](https://your-grafana.azure.com) or ask your IT manager for the URL.
+Open the platform's Azure Monitor workbooks or Application Insights resource in the Azure portal.
 
 ---
 
@@ -296,14 +296,14 @@ Your team hit its token quota. There are two possible causes — the response he
 
 | Header present | Cause | Action |
 |---|---|---|
-| `Retry-After` set by APIM | Your subscription key exceeded its tier's TPM or RPM cap | Back-off for the number of seconds in `Retry-After`, then retry. File a ServiceNow request to increase your tier. |
+| `Retry-After` set by APIM | Your subscription key exceeded its tier's TPM or RPM cap | Back off for the number of seconds in `Retry-After`, then request a reviewed tier change if needed. |
 | No `Retry-After`, or it comes from Foundry | Platform-wide capacity saturated (rare — circuit-breaker should have failed over) | Contact your IT manager; this needs platform-level investigation. |
 
 Always implement **exponential back-off with jitter** in your client — do not retry immediately in a tight loop, as this makes the 429 worse.
 
-To request a higher quota: file a request in ServiceNow (ask your IT manager). See [quota-management.md](../docs/playbooks/quota-management.md) for the full process.
+To request a higher quota, contact the platform team with workload and utilization evidence. See [quota-management.md](../docs/playbooks/quota-management.md) for the full process.
 
-> **You never need to contact Microsoft directly about quota.** Interacting with Microsoft support and managing platform-wide Foundry capacity is the Platform Engineer's responsibility — not yours. Your only action is a ServiceNow request.
+> **You never need to contact Microsoft directly about quota.** Microsoft support and platform-wide Foundry capacity are Platform Engineer responsibilities.
 
 ### "Model not found"
 
@@ -311,7 +311,7 @@ The model exists in Foundry but isn't exposed through your APIM endpoint yet. Co
 
 ### Slow responses?
 
-Check [Application Insights](https://portal.azure.com) for latency. If APIM cache hit rate is low, your queries aren't repetitive enough to benefit from caching.
+Check the platform workbooks and Application Insights for gateway and Foundry latency.
 
 ---
 
@@ -362,9 +362,9 @@ agent = client.agents.create_agent(
 | Question | Who to Ask |
 |----------|-----------|
 | "How do I set up logging?" | Your IT manager / Platform team |
-| "Can I increase my token quota?" | File a request in ServiceNow (your IT manager) |
-| "I need a new model" | File a request in ServiceNow; your IT manager evaluates & deploys |
-| "My agent is slow" | Check [Grafana dashboards](#4-monitoring-your-usage); log a ticket if needed |
+| "Can I increase my token quota?" | Contact the platform team with expected usage and recent 429 evidence |
+| "I need a new model" | Ask the platform team to evaluate catalog availability, quota, and tier impact |
+| "My agent is slow" | Check [Azure Monitor workbooks](#4-monitoring-your-usage); log a ticket if needed |
 | "How do I debug a tool call failure?" | Check Application Insights traces (your IT team can show you how) |
 
 ---
@@ -375,13 +375,11 @@ agent = client.agents.create_agent(
 ✅ **Design agents with fewer tool calls** - Reduces latency & cost  
 ✅ **Reuse threads** - Store `thread_id` for conversation continuity  
 ✅ **Monitor token usage** - Check dashboards to optimize prompts  
-✅ **Cache knowledge indexes** - If using RAG, let APIM's semantic cache work  
 ✅ **Test locally first** - Use the same APIM endpoint locally and in prod  
 
 ---
 
 **Next Steps:**
-- 👉 Explore [code examples](../examples/)
 - 👉 Read [Architecture Decisions](../adr/) if you're curious about why we built it this way
-- 👉 Ask your IT manager for Grafana dashboard access
+- 👉 Ask your IT manager for Azure Monitor workbook access
 - 👉 SDK routing questions? See [SDK Endpoint FAQ](reference/sdk-endpoint-questions.md)

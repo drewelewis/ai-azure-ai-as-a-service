@@ -1,10 +1,10 @@
-// E2E Trace — Panel 2: Requests per Subscription over Time (stacked bar chart)
+// E2E Trace — Panel 2: Requests per Subscription over Time (clustered columns)
 // Data source:  AppRequests
 // Parameters:   {TimeRange}        — workbook time-range picker
 //               {SubscriptionName} — LOB subscription filter (value:all = no filter)
 //
-// 5-minute buckets, each colour = one APIM subscription (LOB).
-// One subscription dominating = that LOB is bursting beyond its quota.
+// 5-minute buckets, each coloured column = one APIM subscription (LOB).
+// Unstacked columns keep equal per-subscription request counts visible side by side.
 
 AppRequests
 | where TimeGenerated {TimeRange}

@@ -1,37 +1,28 @@
 // Bicep: Deploy Azure API Management Gateway for AI Workloads
 //
 // This template deploys:
-// - APIM instance (Premium tier — required for VNet integration and PCI DSS network segmentation)
+// - APIM instance (Premium tier for internal VNet integration)
 // - VNet integration in Internal mode (no public inbound traffic)
-// - TLS 1.2+ enforcement (PCI DSS Req 4.2.1)
-// - Customer-managed encryption key via Key Vault (PCI DSS Req 3.7)
-// - Diagnostic settings routed to Log Analytics (PCI DSS Req 10)
+// - TLS 1.2+ enforcement
+// - Diagnostic settings routed to Log Analytics
 // - Logger to Application Insights
 // - Rate limit / token quota policies
-// - Backend routing to Azure OpenAI & Foundry
-//
-// PCI DSS v4.0 requirements addressed by this infrastructure:
-//   Req 1   — Segmented network using VNet Internal mode + NSG
-//   Req 3.7 — Encryption key management via Azure Key Vault HSM
-//   Req 4.2.1 — TLS 1.2+ only, TLS 1.0/1.1/SSL disabled
-//   Req 6.4 — WAF in front of APIM (Application Gateway / Front Door)
-//   Req 10  — All APIM diagnostic categories sent to Log Analytics Workspace
+// - Backend routing to Azure AI Foundry
 
 @description('APIM instance name')
 param apimName string = 'your-company-ai'
-
-@description('Azure OpenAI resource name (leave blank to use only Foundry AIServices accounts)')
-param openaiResourceName string = ''
-
-@description('Azure OpenAI key (leave blank if openaiResourceName is empty)')
-@secure()
-param openaiApiKey string = ''
 
 @description('Primary Foundry AIServices endpoint — output of foundry-hub-project.bicep module (e.g. https://contoso-foundry-primary.services.ai.azure.com)')
 param foundryPrimaryEndpoint string
 
 @description('Secondary Foundry AIServices endpoint for circuit-breaker failover (West US)')
 param foundrySecondaryEndpoint string
+
+@description('Deployment names available to Bronze subscribers.')
+param bronzeModelDeploymentNames array
+
+@description('Deployment names available to Silver subscribers.')
+param silverModelDeploymentNames array
 
 @description('URL to the Azure OpenAI Inference OpenAPI spec.')
 param openaiInferenceApiSpecUrl string = 'https://raw.githubusercontent.com/Azure/azure-rest-api-specs/main/specification/cognitiveservices/data-plane/AzureOpenAI/inference/stable/2024-10-21/inference.json'
@@ -42,29 +33,27 @@ param appInsightsName string
 @description('Location for resources')
 param location string = resourceGroup().location
 
-// ---------------------------------------------------------------------------
-// PCI DSS — additional required parameters
-// ---------------------------------------------------------------------------
-
-@description('Log Analytics Workspace resource ID for PCI DSS Req 10 audit logs')
+@description('Log Analytics Workspace resource ID for APIM diagnostic logs')
 param logAnalyticsWorkspaceId string
 
-@description('Virtual Network resource ID for APIM VNet integration (PCI DSS Req 1)')
+@description('Virtual Network resource ID for APIM VNet integration')
 param vnetResourceId string
 
 @description('Subnet name within the VNet to inject APIM into (minimum /28, must have APIM delegation)')
 param apimSubnetName string = 'snet-apim'
 
-@description('Number of APIM scale units. Use 1 for dev; use 3+ (multiple of AZ count) when enabling zone-redundancy (PCI DSS Req 12.3.4).')
+@description('Number of APIM scale units. Use 1 for dev; use 3+ when enabling three-zone redundancy.')
 @minValue(1)
 @maxValue(10)
 param apimCapacity int = 1
 
-@description('Availability zones for APIM Premium. East US requires capacity to be a multiple of zone count. Leave empty ([]) for dev/single-region; set to ["1","2","3"] with capacity=3 for PCI DSS Req 12.3.4 zone-redundancy.')
+@description('Availability zones for APIM Premium. East US requires capacity to be a multiple of zone count. Leave empty ([]) for dev/single-region; set to ["1","2","3"] with capacity=3 for zone redundancy.')
 param availabilityZones array = []
 
 // Build the full APIM URL
 var apimUrl = 'https://${apimName}.azure-api.net'
+var bronzeAllowedModels = join(map(bronzeModelDeploymentNames, model => '&quot;${model}&quot;'), ', ')
+var silverAllowedModels = join(map(silverModelDeploymentNames, model => '&quot;${model}&quot;'), ', ')
 
 // Derived: subnet resource ID from VNet + subnet name
 var apimSubnetId = '${vnetResourceId}/subnets/${apimSubnetName}'
@@ -78,8 +67,6 @@ var foundrySecondaryBase = endsWith(foundrySecondaryEndpoint, '/') ? substring(f
 
 // ==========================================
 // Resource: Application Insights (for logging)
-// PCI DSS: Public network access restricted — ingest via private link only
-// PCI DSS Req 10.5.1: Retain at least 12 months (730 days)
 // ==========================================
 resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
   name: appInsightsName
@@ -87,14 +74,13 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
   kind: 'web'
   properties: {
     Application_Type: 'web'
-    // PCI DSS Req 10.5.1: Retain at least 12 months (365 days minimum; 550 or 730 for extended retention)
     // NOTE: For workspace-based App Insights, retention is inherited from Log Analytics but this field
     // must still be a value from the allowed set: 30,60,90,120,180,270,365,550,730
     RetentionInDays: 365
     WorkspaceResourceId: logAnalyticsWorkspaceId
     IngestionMode: 'LogAnalytics'           // workspace-based; never Classic
     // Public access must be Enabled in dev — APIM (VNet-internal) needs a private endpoint to reach
-    // App Insights when ingestion is Disabled. Configure private link scope for production PCI DSS.
+    // App Insights when ingestion is Disabled. Configure private link scope before disabling public ingestion.
     publicNetworkAccessForIngestion: 'Enabled'
     publicNetworkAccessForQuery: 'Enabled'
     // Local auth (instrumentation key / connection string) is disabled.
@@ -106,38 +92,32 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
 
 // ==========================================
 // Resource: APIM Instance — Premium SKU
-//
-// PCI DSS controls enforced here:
-//   Req 1:     VNet Internal mode — no public inbound gateway traffic
-//   Req 3.7:   Customer-managed encryption key via Key Vault HSM
-//   Req 4.2.1: TLS 1.2+ enforced; TLS 1.0, 1.1, SSL 3.0 explicitly disabled
-//   Req 6.4:   disableGateway:false + HTTP disabled for API operations
-//   Req 12.3.4:Zone-redundant Premium deployment for high availability
 // ==========================================
 resource apim 'Microsoft.ApiManagement/service@2023-05-01-preview' = {
   name: apimName
   location: location
-  // PCI DSS Req 1 / 12.3.4: Premium is required for VNet integration and availability zones
+  // Premium is required for internal VNet integration and availability zones.
   sku: {
     name: 'Premium'
     capacity: apimCapacity
   }
-  // PCI DSS Req 12.3.4: Deploy across availability zones for resilience
+  // Deploy across availability zones when configured.
   zones: availabilityZones
-  // PCI DSS Req 3.7: System-assigned managed identity to access Key Vault CMK
+  // System-assigned managed identity supports keyless downstream access.
   identity: {
     type: 'SystemAssigned'
   }
   properties: {
     publisherEmail: 'admin@your-company.com'
     publisherName: 'Your Company AI Platform'
-    // PCI DSS Req 1: Internal VNet mode — APIM gateway is not reachable from the internet
+    legacyPortalStatus: 'Disabled'
+    // Internal VNet mode keeps the APIM gateway off the public internet.
     // Inbound traffic must come through WAF (Application Gateway / Front Door)
     virtualNetworkType: 'Internal'
     virtualNetworkConfiguration: {
       subnetResourceId: apimSubnetId
     }
-    // PCI DSS Req 4.2.1: Disable weak protocols and cipher suites
+    // Disable weak protocols and cipher suites.
     customProperties: {
       // Disable SSL 3.0
       'Microsoft.WindowsAzure.ApiManagement.Gateway.Security.Protocols.Ssl30': 'false'
@@ -261,8 +241,7 @@ resource logger 'Microsoft.ApiManagement/service/loggers@2023-05-01-preview' = {
 // Sampling: 100% — captures all requests including failovers.
 // Set samplingPercentage lower (e.g. 10) on high-volume production instances.
 //
-// PCI note: verbosity is 'information' (no request/response bodies).
-// Never set verbosity to 'verbose' in PCI scope — it logs body content.
+// Verbosity is 'information'; request and response bodies are not logged.
 // ==========================================
 resource apimAppInsightsDiagnostics 'Microsoft.ApiManagement/service/diagnostics@2023-05-01-preview' = {
   parent: apim
@@ -284,10 +263,10 @@ resource apimAppInsightsDiagnostics 'Microsoft.ApiManagement/service/diagnostics
         // in every AppRequests record — the join key for the E2E Trace workbook that links
         // AGWAccessLogs (Log Analytics) to AppRequests/AppDependencies (App Insights).
         headers: [ 'X-Correlation-Id' ]
-        body: { bytes: 0 }                     // never log request body (PCI + cost)
+        body: { bytes: 0 }                     // never log request body
       }
       response: {
-        headers: [ 'X-Backend-Region-Used', 'X-Correlation-Id', 'X-Tokens-Used', 'X-Cache', 'X-Model-Name' ]   // Foundry region, correlation, token count, cache status, model name
+        headers: [ 'X-Backend-Region-Used', 'X-Correlation-Id', 'X-Tokens-Used', 'X-Model-Name' ]
         body: { bytes: 0 }
       }
     }
@@ -314,10 +293,9 @@ resource apimAppInsightsDiagnostics 'Microsoft.ApiManagement/service/diagnostics
 // ┌─────────────┬──────────────────────────────────┬────────────┬───────────────┐
 // │ Tier        │ Models                           │ Tokens/mo  │ RPM           │
 // ├─────────────┼──────────────────────────────────┼────────────┼───────────────┤
-// │ Bronze      │ gpt-4o-mini, Phi-4               │ 1 M        │ 60            │
-// │ Silver      │ + gpt-4o, Llama-3-70b            │ 10 M       │ 300           │
-// │ Gold        │ All models incl. o1; Agents API; │ 100 M      │ Unlimited     │
-// │             │ PCI DSS scope (approval required)│            │               │
+// │ Bronze      │ Entry portfolio                   │ 1 M        │ 60            │
+// │ Silver      │ Broader portfolio + Agents API    │ 10 M       │ 300           │
+// │ Gold        │ Entire portfolio + Agents API     │ 100 M      │ Unlimited     │
 // └─────────────┴──────────────────────────────────┴────────────┴───────────────┘
 // ==========================================
 
@@ -326,14 +304,14 @@ resource apimAppInsightsDiagnostics 'Microsoft.ApiManagement/service/diagnostics
 // update them in the APIM portal or via az apim nv update.
 
 // ─── Product: Bronze ────────────────────────────────────────────────────────
-// Self-service, no approval. Inference only (gpt-4o-mini, Phi-4).
+// Self-service, no approval. Entry portfolio inference only.
 // 500 TPM · 60 RPM · failover enabled.
 resource bronzeProduct 'Microsoft.ApiManagement/service/products@2023-05-01-preview' = {
   parent: apim
-  name: 'ai-bronze'
+  name: 'bronze'
   properties: {
     displayName: 'AI Bronze'
-    description: 'Entry-tier AI access. Models: gpt-4o-mini, Phi-4. 500 TPM, 60 RPM. Multi-region failover included.'
+    description: 'Entry-tier AI access. Models: ${join(bronzeModelDeploymentNames, ', ')}. 500 TPM, 60 RPM. Multi-region failover included.'
     subscriptionRequired: true
     approvalRequired: false
     state: 'published'
@@ -345,7 +323,7 @@ resource bronzeProductPolicy 'Microsoft.ApiManagement/service/products/policies@
   name: 'policy'
   properties: {
     format: 'rawxml'
-    value: '''<policies>
+    value: replace('''<policies>
   <inbound>
     <base />
     <!-- Circuit-breaker failover: primary East US → secondary West US on 429/5xx -->
@@ -381,14 +359,14 @@ resource bronzeProductPolicy 'Microsoft.ApiManagement/service/products/policies@
           var depIdx = System.Array.IndexOf(pathParts, &quot;deployments&quot;);
           var deploymentFromPath = depIdx >= 0 &amp;&amp; depIdx + 1 &lt; pathParts.Length ? pathParts[depIdx + 1] : null;
           var effectiveModel = modelFromBody ?? deploymentFromPath;
-          var allowed = new[] { &quot;gpt-4o-mini&quot;, &quot;phi-4&quot;, &quot;phi-4-mini&quot;, &quot;text-embedding-3-small&quot; };
+          var allowed = new[] { __ALLOWED_MODELS__ };
           return effectiveModel != null &amp;&amp; !allowed.Any(m => effectiveModel.StartsWith(m, StringComparison.OrdinalIgnoreCase));
         } catch { return false; }
       }">
         <return-response>
           <set-status code="403" reason="Forbidden" />
           <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
-          <set-body>{"error":{"code":"ModelNotAllowed","message":"Your Bronze subscription allows gpt-4o-mini, Phi-4, Phi-4-mini, and text-embedding-3-small. Upgrade to Silver or Gold for gpt-4o, Llama-3-70b, and text-embedding-3-large."}}</set-body>
+          <set-body>{"error":{"code":"ModelNotAllowed","message":"This deployment is not included in the Bronze portfolio. Use an allowed deployment or upgrade to Silver or Gold."}}</set-body>
         </return-response>
       </when>
     </choose>
@@ -408,19 +386,19 @@ resource bronzeProductPolicy 'Microsoft.ApiManagement/service/products/policies@
   </backend>
   <outbound><base /></outbound>
   <on-error><base /></on-error>
-</policies>'''
+</policies>''', '__ALLOWED_MODELS__', bronzeAllowedModels)
   }
 }
 
 // ─── Product: Silver ────────────────────────────────────────────────────────
 // Self-service, no approval. Inference + Agents API.
-// gpt-4o, gpt-4o-mini, Phi-4, Llama-3-70b. 1 K TPM · 120 RPM · failover.
+// Broader portfolio plus Agents API. 1 K TPM · 120 RPM · failover.
 resource silverProduct 'Microsoft.ApiManagement/service/products@2023-05-01-preview' = {
   parent: apim
-  name: 'ai-silver'
+  name: 'silver'
   properties: {
     displayName: 'AI Silver'
-    description: 'Mid-tier AI access. Models: gpt-4o, gpt-4o-mini, Phi-4, Llama-3-70b + Agents API. 1K TPM, 120 RPM. Multi-region failover included.'
+    description: 'Mid-tier AI access. Models: ${join(silverModelDeploymentNames, ', ')} + Agents API. 1K TPM, 120 RPM. Multi-region failover included.'
     subscriptionRequired: true
     approvalRequired: false
     state: 'published'
@@ -432,7 +410,7 @@ resource silverProductPolicy 'Microsoft.ApiManagement/service/products/policies@
   name: 'policy'
   properties: {
     format: 'rawxml'
-    value: '''<policies>
+    value: replace('''<policies>
   <inbound>
     <base />
     <!-- Circuit-breaker failover -->
@@ -467,14 +445,14 @@ resource silverProductPolicy 'Microsoft.ApiManagement/service/products/policies@
           var depIdx = System.Array.IndexOf(pathParts, &quot;deployments&quot;);
           var deploymentFromPath = depIdx >= 0 &amp;&amp; depIdx + 1 &lt; pathParts.Length ? pathParts[depIdx + 1] : null;
           var effectiveModel = modelFromBody ?? deploymentFromPath;
-          var allowed = new[] { &quot;gpt-4o&quot;, &quot;gpt-4o-mini&quot;, &quot;phi-4&quot;, &quot;phi-4-mini&quot;, &quot;llama-3&quot;, &quot;meta-llama&quot;, &quot;text-embedding-3-small&quot; };
+          var allowed = new[] { __ALLOWED_MODELS__ };
           return effectiveModel != null &amp;&amp; !allowed.Any(m => effectiveModel.StartsWith(m, StringComparison.OrdinalIgnoreCase));
         } catch { return false; }
       }">
         <return-response>
           <set-status code="403" reason="Forbidden" />
           <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
-          <set-body>{"error":{"code":"ModelNotAllowed","message":"Your Silver subscription allows gpt-4o, gpt-4o-mini, Phi-4, Llama-3-70b, and text-embedding-3-small. Upgrade to Gold for o1, text-embedding-3-large, and other premium models."}}</set-body>
+          <set-body>{"error":{"code":"ModelNotAllowed","message":"This deployment is not included in the Silver portfolio. Use an allowed deployment or upgrade to Gold."}}</set-body>
         </return-response>
       </when>
     </choose>
@@ -494,26 +472,23 @@ resource silverProductPolicy 'Microsoft.ApiManagement/service/products/policies@
   </backend>
   <outbound><base /></outbound>
   <on-error><base /></on-error>
-</policies>'''
+</policies>''', '__ALLOWED_MODELS__', silverAllowedModels)
   }
 }
 
 // ─── Product: Gold ──────────────────────────────────────────────────────────
-// Requires approval. Full model access (all models incl. o1) + Agents API +
-// PCI DSS scope eligibility. 2 K TPM · 240 RPM · failover.
-// PCI DSS Req 7: Require explicit subscription approval. subscriptionsLimit: 1
-// ensures least-privilege — a single customer cannot hold multiple Gold keys.
+// Requires approval. Full model access + Agents API. 2 K TPM · 240 RPM · failover.
 resource goldProduct 'Microsoft.ApiManagement/service/products@2023-05-01-preview' = {
   parent: apim
-  name: 'ai-gold'
+  name: 'gold'
   properties: {
     displayName: 'AI Gold'
-    description: 'Premium AI access. All models (gpt-4o, o1, Phi-4, Llama-3-70b) + Agents API + PCI DSS scope eligibility. 2,000 TPM, 240 RPM. Multi-region failover included. Requires approval.'
+    description: 'Premium AI access to the entire deployed model portfolio and Agents API. 2,000 TPM, 240 RPM. Multi-region failover included. Requires approval.'
     subscriptionRequired: true
-    // PCI DSS Req 7: manual approval required for highest-privilege tier
+    // Manual approval is required for the highest-privilege tier.
     approvalRequired: true
     state: 'published'
-    // PCI DSS Req 7: one subscription per customer — enforces least privilege
+    // Limit each owner to one Gold subscription.
     subscriptionsLimit: 1
   }
 }
@@ -568,37 +543,9 @@ resource goldProductPolicy 'Microsoft.ApiManagement/service/products/policies@20
 }
 
 // ==========================================
-// Resource: Azure OpenAI Backend (legacy resource — kept for any direct OpenAI operations)
-// PCI DSS Req 4.2.1: Backend connections enforce TLS 1.2+ (via APIM customProperties)
-// PCI DSS Req 1: Backend URL must be private endpoint / internal VNet address in production
-// NOTE: Prefer the Foundry backends below — AIServices accounts expose the same
-//       OpenAI-compatible surface AND the Agents API in one endpoint.
-// ==========================================
-// azure-openai backend only deployed when an explicit Azure OpenAI resource is provided.
-// When left blank, all inference routes through the Foundry AIServices endpoints below.
-resource openaiBackend 'Microsoft.ApiManagement/service/backends@2023-05-01-preview' = if (!empty(openaiResourceName)) {
-  parent: apim
-  name: 'azure-openai'
-  properties: {
-    url: 'https://${openaiResourceName}.openai.azure.com'
-    protocol: 'http'
-    description: 'Azure OpenAI backend (PCI: accessed via private endpoint inside VNet)'
-    credentials: {
-      header: {
-        'api-key': [openaiApiKey]
-      }
-    }
-    tls: {
-      validateCertificateChain: true
-      validateCertificateName: true
-    }
-  }
-}
-
-// ==========================================
 // Resource: Foundry Backends (primary East US + secondary West US)
 // Endpoints are AIServices accounts provisioned by foundry-hub-project.bicep.
-// The circuit-breaker-multi-region.xml policy switches between these at runtime.
+// The inline API policy switches between these at runtime.
 // ==========================================
 resource foundryPrimaryBackend 'Microsoft.ApiManagement/service/backends@2023-05-01-preview' = {
   parent: apim
@@ -631,7 +578,7 @@ resource foundrySecondaryBackend 'Microsoft.ApiManagement/service/backends@2023-
 // ==========================================
 // Resource: APIM Named Values for Foundry endpoints
 // Referenced in policies as {{foundry-primary-endpoint}} / {{foundry-secondary-endpoint}}
-// Used by circuit-breaker-multi-region.xml to switch backends without hardcoded URLs.
+// Used by the inline failover policy to switch backends without hardcoded URLs.
 // ==========================================
 resource foundryPrimaryNV 'Microsoft.ApiManagement/service/namedValues@2023-05-01-preview' = {
   parent: apim
@@ -655,19 +602,16 @@ resource foundrySecondaryNV 'Microsoft.ApiManagement/service/namedValues@2023-05
 
 // ==========================================
 // Resource: Diagnostic Settings for APIM
-// PCI DSS Req 10: All APIM diagnostic categories sent to Log Analytics Workspace
-// PCI DSS Req 10.5.1: Retained for 395 days (13 months)
 // ==========================================
 resource apimDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
   scope: apim
-  name: 'pci-dss-audit-diagnostics'
+  name: 'apim-audit-diagnostics'
   properties: {
     workspaceId: logAnalyticsWorkspaceId
     // Resource-specific mode: each log category gets its own table
     // (ApiManagementGatewayLogs, ApiManagementWebSocketConnectionLogs, etc.)
     // rather than all going into the combined AzureDiagnostics table.
     // This enables cleaner column names and better query performance.
-    // PCI DSS Req 10.2.1: Capture all gateway and management logs
     logAnalyticsDestinationType: 'Dedicated'
     logs: [
       { category: 'GatewayLogs',             enabled: true }
@@ -689,8 +633,7 @@ resource apimDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-previ
 // data-plane (which is VNet-internal) to reach GitHub. ARM has outbound access.
 //
 // serviceUrl → primary Foundry /openai surface (OpenAI-compatible).
-// circuit-breaker-multi-region.xml overrides this at runtime for failover.
-// PCI DSS Req 4.2.1: protocols: ['https'] only.
+// The inline API policy overrides this at runtime for failover.
 // ==========================================
 resource openaiInferenceApi 'Microsoft.ApiManagement/service/apis@2023-05-01-preview' = {
   parent: apim
@@ -741,6 +684,9 @@ resource openaiInferenceApi 'Microsoft.ApiManagement/service/apis@2023-05-01-pre
 resource openaiInferenceApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2023-05-01-preview' = {
   parent: openaiInferenceApi
   name: 'policy'
+  dependsOn: [
+    openaiResponsesDelete
+  ]
   properties: {
     format: 'rawxml'
     value: '''<policies>
@@ -777,15 +723,15 @@ resource openaiInferenceApiPolicy 'Microsoft.ApiManagement/service/apis/policies
     <choose>
       <when condition="@(context.Response.StatusCode == 200)">
         <set-variable name="totalTokens" value="@{
-          try { return context.Response.Body.As<JObject>(preserveContent: true)?["usage"]?["total_tokens"]?.ToString() ?? "0"; }
-          catch { return "0"; }
+          try { return context.Response.Body.As&lt;JObject&gt;(preserveContent: true)?[&quot;usage&quot;]?[&quot;total_tokens&quot;]?.ToString() ?? &quot;0&quot;; }
+          catch { return &quot;0&quot;; }
         }" />
         <set-header name="X-Tokens-Used" exists-action="override">
           <value>@((string)context.Variables.GetValueOrDefault("totalTokens", "0"))</value>
         </set-header>
         <set-variable name="modelName" value="@{
-          try { return context.Response.Body.As<JObject>(preserveContent: true)?["model"]?.ToString() ?? ""; }
-          catch { return ""; }
+          try { return context.Response.Body.As&lt;JObject&gt;(preserveContent: true)?[&quot;model&quot;]?.ToString() ?? &quot;&quot;; }
+          catch { return &quot;&quot;; }
         }" />
         <set-header name="X-Model-Name" exists-action="override">
           <value>@((string)context.Variables.GetValueOrDefault("modelName", ""))</value>
@@ -823,24 +769,45 @@ resource modelInferenceApiPolicy 'Microsoft.ApiManagement/service/apis/policies@
     <base />
     <!-- Read model name from request body (preserveContent ensures body is still forwarded). -->
     <set-variable name="requestedModel" value="@{
-      try { return context.Request.Body.As<JObject>(preserveContent: true)?["model"]?.ToString() ?? ""; }
-      catch { return ""; }
+      try { return context.Request.Body.As&lt;JObject&gt;(preserveContent: true)?[&quot;model&quot;]?.ToString() ?? &quot;&quot;; }
+      catch { return &quot;&quot;; }
     }" />
-    <set-backend-service base-url="{{foundry-primary-endpoint}}/models" />
+    <cache-lookup-value key="primary-circuit-open" variable-name="primaryCircuitOpen" />
+    <choose>
+      <when condition="@(context.Variables.ContainsKey(&quot;primaryCircuitOpen&quot;))">
+        <set-backend-service base-url="{{foundry-secondary-endpoint}}/models" />
+        <set-variable name="selectedBackend" value="secondary-failover" />
+      </when>
+      <otherwise>
+        <set-backend-service base-url="{{foundry-primary-endpoint}}/models" />
+        <set-variable name="selectedBackend" value="primary" />
+      </otherwise>
+    </choose>
   </inbound>
   <backend>
     <base />
   </backend>
   <outbound>
     <base />
+    <choose>
+      <when condition="@(context.Response.StatusCode == 429 &amp;&amp; (string)context.Variables.GetValueOrDefault(&quot;selectedBackend&quot;, &quot;primary&quot;) == &quot;primary&quot;)">
+        <cache-store-value key="primary-circuit-open" value="true" duration="30" />
+      </when>
+      <when condition="@(context.Response.StatusCode == 200 &amp;&amp; (string)context.Variables.GetValueOrDefault(&quot;selectedBackend&quot;, &quot;primary&quot;) == &quot;primary&quot;)">
+        <cache-remove-value key="primary-circuit-open" />
+      </when>
+    </choose>
+    <set-header name="X-Backend-Region-Used" exists-action="override">
+      <value>@(context.Variables.GetValueOrDefault("selectedBackend", "primary"))</value>
+    </set-header>
     <set-header name="X-Model-Name" exists-action="override">
       <value>@((string)context.Variables.GetValueOrDefault("requestedModel", ""))</value>
     </set-header>
     <choose>
       <when condition="@(context.Response.StatusCode == 200)">
         <set-variable name="totalTokens" value="@{
-          try { return context.Response.Body.As<JObject>(preserveContent: true)?["usage"]?["total_tokens"]?.ToString() ?? "0"; }
-          catch { return "0"; }
+          try { return context.Response.Body.As&lt;JObject&gt;(preserveContent: true)?[&quot;usage&quot;]?[&quot;total_tokens&quot;]?.ToString() ?? &quot;0&quot;; }
+          catch { return &quot;0&quot;; }
         }" />
         <set-header name="X-Tokens-Used" exists-action="override">
           <value>@((string)context.Variables.GetValueOrDefault("totalTokens", "0"))</value>
@@ -850,6 +817,9 @@ resource modelInferenceApiPolicy 'Microsoft.ApiManagement/service/apis/policies@
   </outbound>
   <on-error>
     <base />
+    <set-header name="X-Backend-Region-Used" exists-action="override">
+      <value>@(context.Variables.GetValueOrDefault("selectedBackend", "unknown"))</value>
+    </set-header>
   </on-error>
 </policies>'''
   }
@@ -875,6 +845,9 @@ resource openaiResponsesPost 'Microsoft.ApiManagement/service/apis/operations@20
 resource openaiResponsesGet 'Microsoft.ApiManagement/service/apis/operations@2023-05-01-preview' = {
   parent: openaiInferenceApi
   name: 'responses-get'
+  dependsOn: [
+    openaiResponsesPost
+  ]
   properties: {
     displayName: 'Retrieve a model response'
     method: 'GET'
@@ -892,6 +865,9 @@ resource openaiResponsesGet 'Microsoft.ApiManagement/service/apis/operations@202
 resource openaiResponsesDelete 'Microsoft.ApiManagement/service/apis/operations@2023-05-01-preview' = {
   parent: openaiInferenceApi
   name: 'responses-delete'
+  dependsOn: [
+    openaiResponsesGet
+  ]
   properties: {
     displayName: 'Delete a model response'
     method: 'DELETE'
@@ -912,7 +888,6 @@ resource openaiResponsesDelete 'Microsoft.ApiManagement/service/apis/operations@
 // Covers: agents, threads, runs, messages, files, vector stores.
 //
 // serviceUrl → primary Foundry /agents/v1.0 surface.
-// PCI DSS Req 4.2.1: protocols: ['https'] only.
 // ==========================================
 // Foundry Agents API — created as a blank HTTP passthrough.
 // Spec import is skipped: the azure-rest-api-specs URL for the agents data-plane
@@ -963,6 +938,53 @@ resource foundryAgentsWildcardDelete 'Microsoft.ApiManagement/service/apis/opera
   }
 }
 
+resource foundryAgentsApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2023-05-01-preview' = {
+  parent: foundryAgentsApi
+  name: 'policy'
+  properties: {
+    format: 'rawxml'
+    value: '''<policies>
+  <inbound>
+    <base />
+    <cache-lookup-value key="primary-circuit-open" variable-name="primaryCircuitOpen" />
+    <choose>
+      <when condition="@(context.Variables.ContainsKey(&quot;primaryCircuitOpen&quot;))">
+        <set-backend-service base-url="{{foundry-secondary-endpoint}}/agents/v1.0" />
+        <set-variable name="selectedBackend" value="secondary-failover" />
+      </when>
+      <otherwise>
+        <set-backend-service base-url="{{foundry-primary-endpoint}}/agents/v1.0" />
+        <set-variable name="selectedBackend" value="primary" />
+      </otherwise>
+    </choose>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+    <choose>
+      <when condition="@(context.Response.StatusCode == 429 &amp;&amp; (string)context.Variables.GetValueOrDefault(&quot;selectedBackend&quot;, &quot;primary&quot;) == &quot;primary&quot;)">
+        <cache-store-value key="primary-circuit-open" value="true" duration="30" />
+      </when>
+      <when condition="@(context.Response.StatusCode == 200 &amp;&amp; (string)context.Variables.GetValueOrDefault(&quot;selectedBackend&quot;, &quot;primary&quot;) == &quot;primary&quot;)">
+        <cache-remove-value key="primary-circuit-open" />
+      </when>
+    </choose>
+    <set-header name="X-Backend-Region-Used" exists-action="override">
+      <value>@(context.Variables.GetValueOrDefault("selectedBackend", "primary"))</value>
+    </set-header>
+  </outbound>
+  <on-error>
+    <base />
+    <set-header name="X-Backend-Region-Used" exists-action="override">
+      <value>@(context.Variables.GetValueOrDefault("selectedBackend", "unknown"))</value>
+    </set-header>
+  </on-error>
+</policies>'''
+  }
+}
+
 // ==========================================
 // Resource: Azure AI Model Inference API
 //
@@ -973,7 +995,6 @@ resource foundryAgentsWildcardDelete 'Microsoft.ApiManagement/service/apis/opera
 //
 // Endpoint path: /models  (e.g. POST /models/chat/completions)
 // Spec: azure-ai-inference stable 2024-05-01-preview
-// PCI DSS Req 4.2.1: protocols: ['https'] only.
 // ==========================================
 // NOTE: spec import removed — azure-rest-api-specs ModelInference openapi.json contains $ref links to
 // Azure.AI.Inference/stable/2024-05-01-preview/ which no longer exists in the repo (directory deleted).
@@ -1066,66 +1087,10 @@ resource goldAgentsLink 'Microsoft.ApiManagement/service/products/apis@2023-05-0
 }
 
 // ==========================================
-// Resource: APIM Subscriptions — Bronze, Silver, Gold created at deploy time
-//
-// Keys are auto-generated by Azure — no plaintext secrets stored in this template.
-// Retrieve the primary key after deployment:
-//   BranchAdvisor:      az apim subscription show --service-name <apim> -g <rg> --subscription-id app-branch-advisor       --query primaryKey -o tsv
-//   AMLScreening:       az apim subscription show --service-name <apim> -g <rg> --subscription-id app-aml-screening         --query primaryKey -o tsv
-//   CreditUnderwriting: az apim subscription show --service-name <apim> -g <rg> --subscription-id app-credit-underwriting   --query primaryKey -o tsv
-//   InvestmentPlatform: az apim subscription show --service-name <apim> -g <rg> --subscription-id app-investment-platform   --query primaryKey -o tsv
-// Or: APIM portal → Subscriptions → find the app display name → Show Keys
-// ==========================================
-
-// Bronze — BranchAdvisor: branch staff AI assistant for product Q&A and customer queries (~low token usage, bursty during business hours)
-resource branchAdvisorSub 'Microsoft.ApiManagement/service/subscriptions@2023-05-01-preview' = {
-  parent: apim
-  name: 'app-branch-advisor'
-  properties: {
-    displayName: 'Branch Advisor'
-    scope: bronzeProduct.id
-    state: 'active'
-  }
-}
-
-// Silver — AMLScreening: real-time anti-money laundering transaction narrative analysis (latency-sensitive, sustained load)
-resource amlScreeningSub 'Microsoft.ApiManagement/service/subscriptions@2023-05-01-preview' = {
-  parent: apim
-  name: 'app-aml-screening'
-  properties: {
-    displayName: 'AML Screening'
-    scope: silverProduct.id
-    state: 'active'
-  }
-}
-
-// Silver — CreditUnderwriting: automated credit assessment and underwriting narrative generation (burst on application peaks)
-resource creditUnderwritingSub 'Microsoft.ApiManagement/service/subscriptions@2023-05-01-preview' = {
-  parent: apim
-  name: 'app-credit-underwriting'
-  properties: {
-    displayName: 'Credit Underwriting'
-    scope: silverProduct.id
-    state: 'active'
-  }
-}
-
-// Gold — InvestmentPlatform: algorithmic trading and portfolio analysis platform (high TPM, low latency, premium models)
-resource investmentPlatformSub 'Microsoft.ApiManagement/service/subscriptions@2023-05-01-preview' = {
-  parent: apim
-  name: 'app-investment-platform'
-  properties: {
-    displayName: 'Investment Platform'
-    scope: goldProduct.id
-    state: 'active'
-  }
-}
-
-// ==========================================
 // Private DNS Zone for APIM Internal VNet
 //
 // APIM Internal VNet mode does NOT create a public DNS record. Resources
-// inside the VNet (e.g. the ACI jumpbox, Function App) need DNS to resolve
+// inside the VNet (for example, the ACI jumpbox) need DNS to resolve
 // the APIM hostname to its private IP address.
 //
 // Zone: azure-api.net
@@ -1190,7 +1155,7 @@ resource apimMonitoringMetricsPublisher 'Microsoft.Authorization/roleAssignments
 // ==========================================
 // Output: APIM Managed Identity Principal ID
 // Use this to assign 'Cognitive Services User' role on OpenAI and Foundry resources
-// and 'Key Vault Crypto User' on the Key Vault (PCI DSS Req 3.7)
+// and 'Key Vault Crypto User' on the Key Vault.
 // ==========================================
 output apimResourceId string = apim.id
 // Private IP assigned by Azure when APIM is injected into Internal VNet.
@@ -1203,13 +1168,9 @@ output apimManagedIdentityTenantId string = apim.identity.tenantId
 // Output: Important URLs and Info
 // ==========================================
 output apimGatewayUrl string = apimUrl
-// PCI DSS: App Insights has DisableLocalAuth: true — only Entra-authenticated writes are accepted.
+// App Insights has DisableLocalAuth: true, so only Entra-authenticated writes are accepted.
 // APIM logger uses managed identity; SDK clients use the connection string from this output.
 output appInsightsConnectionString string = appInsights.properties.ConnectionString
-// Subscription IDs — use these with `az apim subscription show --query primaryKey` to retrieve keys
-output branchAdvisorSubId string = branchAdvisorSub.name
-output amlScreeningSubId string = amlScreeningSub.name
-output creditUnderwritingSubId string = creditUnderwritingSub.name
 output appInsightsResourceId string = appInsights.id
 
 @description('How developers connect (internal VNet mode — must connect from within the VNet or via private DNS):')

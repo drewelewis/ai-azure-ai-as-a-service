@@ -5,7 +5,7 @@
 //
 // Nine time-series lines across three layers × three percentiles:
 //   App Gateway (blue family)  — WAF inspection + TLS termination, as seen by the client
-//   APIM overhead (orange)     — policy execution: auth, quota check, cache, logging
+//   APIM overhead (orange)     — policy execution: auth, quota check, headers, logging
 //                                = APIM TotalTime − BackendTime
 //   Foundry inference (green)  — AI model generation time at the backend
 //
@@ -14,12 +14,10 @@
 // How to read this chart:
 //   P99 spike on Foundry inference = occasional slow model response (cold start, long prompt,
 //     or secondary region round-trip adding ~300–500 ms during failover).
-//   P99 spike on APIM overhead    = policy occasionally stalling — check semantic cache miss
-//     storm or synchronous Key Vault lookup.
+//   P99 spike on APIM overhead    = policy or authentication occasionally stalling.
 //   P99 spike on App GW            = WAF rule hit or TLS renegotiation; correlate with
 //     AGWFirewallLogs for blocked rule IDs.
-//   P50 and P99 diverging widely   = request mix is bimodal — short cache hits + long cold
-//     inferences arriving in the same bucket.
+//   P50 and P99 diverging widely   = request or model mix has strongly different latency.
 //
 // Join strategy:
 //   APIM total time and Foundry backend time come from ApiManagementGatewayLogs (TotalTime,

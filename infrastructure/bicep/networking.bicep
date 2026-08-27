@@ -1,9 +1,8 @@
 // Bicep: Core networking for the AI-as-a-Service platform
 //
-// Creates a VNet with three subnets:
+// Creates a VNet with dedicated platform subnets:
 //   snet-apim          — APIM Premium Internal VNet injection (/24)
 //   snet-appgw-primary — App Gateway WAF v2 (/24, no resource sharing)
-//   snet-functions     — Future: Function App VNet integration (/24)
 //
 // The VNet address space (10.100.0.0/16) is chosen to avoid overlap with
 // common corporate ranges (10.0.x.x, 192.168.x.x). Adjust if your org
@@ -23,8 +22,8 @@ param tags object = {}
 // explicit egress, APIM cannot send telemetry to the App Insights
 // ingestion endpoint (eastus-8.in.applicationinsights.azure.com:443).
 //
-// A NAT Gateway gives the subnet a predictable static outbound IP, which
-// also supports PCI DSS egress logging requirements.
+// A NAT Gateway gives the subnet a predictable static outbound IP for
+// allowlisting and egress diagnostics.
 // ---------------------------------------------------------------------------
 
 resource natGwPip 'Microsoft.Network/publicIPAddresses@2023-05-01' = {
@@ -60,8 +59,6 @@ resource natGateway 'Microsoft.Network/natGateways@2023-05-01' = {
 // ---------------------------------------------------------------------------
 // NSG for APIM subnet — required for APIM Internal VNet mode
 // See: https://aka.ms/apiminternalvnet
-//
-// PCI DSS Req 1: Explicit allowlist; default deny-all for unlisted ports.
 // ---------------------------------------------------------------------------
 
 resource apimNsg 'Microsoft.Network/networkSecurityGroups@2023-05-01' = {
@@ -190,124 +187,6 @@ resource apimNsg 'Microsoft.Network/networkSecurityGroups@2023-05-01' = {
   }
 }
 
-// NSG for AzureBastionSubnet — required rules per Microsoft documentation
-// https://learn.microsoft.com/azure/bastion/bastion-nsg
-resource bastionNsg 'Microsoft.Network/networkSecurityGroups@2023-05-01' = {
-  name: 'nsg-${prefix}-bastion'
-  location: location
-  tags: tags
-  properties: {
-    securityRules: [
-      // ── Inbound ───────────────────────────────────────────────────────────
-      {
-        name: 'AllowHttpsFromInternet'
-        properties: {
-          priority: 100
-          direction: 'Inbound'
-          access: 'Allow'
-          protocol: 'Tcp'
-          sourcePortRange: '*'
-          destinationPortRange: '443'
-          sourceAddressPrefix: 'Internet'
-          destinationAddressPrefix: '*'
-        }
-      }
-      {
-        name: 'AllowGatewayManager'
-        properties: {
-          priority: 110
-          direction: 'Inbound'
-          access: 'Allow'
-          protocol: 'Tcp'
-          sourcePortRange: '*'
-          destinationPortRange: '443'
-          sourceAddressPrefix: 'GatewayManager'
-          destinationAddressPrefix: '*'
-        }
-      }
-      {
-        name: 'AllowAzureLoadBalancer'
-        properties: {
-          priority: 120
-          direction: 'Inbound'
-          access: 'Allow'
-          protocol: 'Tcp'
-          sourcePortRange: '*'
-          destinationPortRange: '443'
-          sourceAddressPrefix: 'AzureLoadBalancer'
-          destinationAddressPrefix: '*'
-        }
-      }
-      {
-        name: 'AllowBastionHostCommunication'
-        properties: {
-          priority: 130
-          direction: 'Inbound'
-          access: 'Allow'
-          protocol: '*'
-          sourcePortRange: '*'
-          destinationPortRanges: ['8080', '5701']
-          sourceAddressPrefix: 'VirtualNetwork'
-          destinationAddressPrefix: 'VirtualNetwork'
-        }
-      }
-      // ── Outbound ──────────────────────────────────────────────────────────
-      {
-        name: 'AllowRdpSshToVnet'
-        properties: {
-          priority: 100
-          direction: 'Outbound'
-          access: 'Allow'
-          protocol: 'Tcp'
-          sourcePortRange: '*'
-          destinationPortRanges: ['3389', '22']
-          sourceAddressPrefix: '*'
-          destinationAddressPrefix: 'VirtualNetwork'
-        }
-      }
-      {
-        name: 'AllowAzureCloudOutbound'
-        properties: {
-          priority: 110
-          direction: 'Outbound'
-          access: 'Allow'
-          protocol: 'Tcp'
-          sourcePortRange: '*'
-          destinationPortRange: '443'
-          sourceAddressPrefix: '*'
-          destinationAddressPrefix: 'AzureCloud'
-        }
-      }
-      {
-        name: 'AllowBastionCommunicationOutbound'
-        properties: {
-          priority: 120
-          direction: 'Outbound'
-          access: 'Allow'
-          protocol: '*'
-          sourcePortRange: '*'
-          destinationPortRanges: ['8080', '5701']
-          sourceAddressPrefix: 'VirtualNetwork'
-          destinationAddressPrefix: 'VirtualNetwork'
-        }
-      }
-      {
-        name: 'AllowHttpOutbound'
-        properties: {
-          priority: 130
-          direction: 'Outbound'
-          access: 'Allow'
-          protocol: '*'
-          sourcePortRange: '*'
-          destinationPortRange: '80'
-          sourceAddressPrefix: '*'
-          destinationAddressPrefix: 'Internet'
-        }
-      }
-    ]
-  }
-}
-
 // ---------------------------------------------------------------------------
 // NSG for App Gateway subnet — required rules for WAF v2 public listener
 //
@@ -316,8 +195,8 @@ resource bastionNsg 'Microsoft.Network/networkSecurityGroups@2023-05-01' = {
 //   Inbound  port 65200-65535  from GatewayManager — AppGW v2 management plane
 //   All other inbound denied by default (implicit deny-all)
 //
-// PCI DSS Req 1.3: No direct internet access to APIM; all inbound goes
-//   via AppGW WAF, which is allowed here at port 443 only.
+// APIM has no direct internet ingress; public traffic enters through AppGW WAF
+// on port 443 only.
 // ---------------------------------------------------------------------------
 resource appgwNsg 'Microsoft.Network/networkSecurityGroups@2023-05-01' = {
   name: 'nsg-${prefix}-appgw-primary'
@@ -327,7 +206,6 @@ resource appgwNsg 'Microsoft.Network/networkSecurityGroups@2023-05-01' = {
     securityRules: [
       {
         // Client HTTPS — must be explicitly allowed; AppGW does not expose HTTP.
-        // PCI DSS Req 4.2.1: TLS-only inbound; HTTP (80) is intentionally absent.
         name: 'AllowHttpsInbound'
         properties: {
           priority: 100
@@ -415,37 +293,19 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-05-01' = {
         }
       }
       {
-        // Reserved for Function App VNet integration (future)
-        name: 'snet-functions'
-        properties: {
-          addressPrefix: '10.100.2.0/24'
-          delegations: [
-            {
-              name: 'functions-delegation'
-              properties: {
-                serviceName: 'Microsoft.Web/serverFarms'
-              }
-            }
-          ]
-        }
-      }
-      {
-        // Azure Bastion — must be named exactly 'AzureBastionSubnet'; minimum /26
-        // Provides browser-based and native RDP to jumpbox without exposing port 3389
-        name: 'AzureBastionSubnet'
-        properties: {
-          addressPrefix: '10.100.3.0/26'
-          networkSecurityGroup: {
-            id: bastionNsg.id
-          }
-        }
-      }
-      {
         // Jumpbox — ACI container for VNet-internal APIM testing
         // Delegation required by Microsoft.ContainerInstance/containerGroups
         name: 'snet-jumpbox'
         properties: {
           addressPrefix: '10.100.4.0/24'
+          natGateway: {
+            id: natGateway.id
+          }
+          serviceEndpoints: [
+            {
+              service: 'Microsoft.Storage'
+            }
+          ]
           delegations: [
             {
               name: 'aci-delegation'
@@ -483,6 +343,7 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-05-01' = {
 
 output vnetId string = vnet.id
 output vnetName string = vnet.name
+output jumpboxSubnetId string = '${vnet.id}/subnets/snet-jumpbox'
 output privateEndpointSubnetId string = '${vnet.id}/subnets/snet-private-endpoints'
 output loadTestSubnetId string = '${vnet.id}/subnets/snet-loadtest'
 output natGatewayPublicIp string = natGwPip.properties.ipAddress

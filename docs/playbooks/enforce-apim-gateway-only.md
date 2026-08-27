@@ -7,7 +7,6 @@ This guide ensures all agent and application traffic flows through APIM, prevent
 **Problem**: If agents can bypass APIM and call Foundry models directly, they circumvent:
 - ❌ Token quota policies
 - ❌ Rate limiting
-- ❌ Semantic caching
 - ❌ Circuit breakers
 - ❌ Audit logging
 - ❌ Cost controls
@@ -63,23 +62,14 @@ resource privateEndpoint 'Microsoft.Network/privateEndpoints@2023-04-01' = {
 
 Your APIM needs permissions, but your apps should NOT:
 
+APIM-to-Foundry access is declared in
+`infrastructure/bicep/foundry-apim-rbac.bicep`. Apply it with `azd provision`.
+Use read-only inventory to verify an application identity does not have direct access:
+
 ```bash
-# Get APIM's managed identity
-APIM_IDENTITY=$(az apim show \
-  --name your-company-ai \
-  --resource-group rg-ai \
-  --query identity.principalId -o tsv)
-
-# Grant APIM the "Azure AI Developer" role
-az role assignment create \
-  --assignee $APIM_IDENTITY \
-  --role "Azure AI Developer" \
-  --scope /subscriptions/YOUR_SUB/resourceGroups/rg-ai/providers/Microsoft.MachineLearningServices/workspaces/ai-hub-project
-
-# Verify your app's managed identity DOES NOT have this role
 az role assignment list \
   --assignee YOUR_APP_IDENTITY \
-  --scope /subscriptions/YOUR_SUB/resourceGroups/rg-ai/providers/Microsoft.MachineLearningServices/workspaces/ai-hub-project
+  --scope /subscriptions/YOUR_SUB/resourceGroups/rg-ai/providers/Microsoft.CognitiveServices/accounts/FOUNDRY_ACCOUNT
 # Should return empty []
 ```
 
@@ -256,26 +246,9 @@ AzureDiagnostics
 | summarize DirectAccessCount=count() by CallerIpAddress, Identity_s
 ```
 
-### Grafana Dashboard
+### Azure Monitor Workbook
 
-Add a panel to your Grafana dashboard (see `observability/grafana/dashboards/`):
-
-```json
-{
-  "title": "APIM Bypass Attempts",
-  "targets": [{
-    "rawQuery": true,
-    "query": "AzureDiagnostics | where ResourceProvider == 'MICROSOFT.MACHINELEARNINGSERVICES' | where CallerIpAddress != 'APIM_IP' | summarize count()"
-  }],
-  "alert": {
-    "conditions": [{
-      "evaluator": { "type": "gt", "params": [0] },
-      "operator": { "type": "and" },
-      "query": { "params": ["A", "5m", "now"] }
-    }]
-  }
-}
-```
+Add the bypass query to the deployed Azure Monitor workbooks so operators can review direct-access attempts alongside APIM traffic.
 
 ---
 
@@ -305,7 +278,7 @@ Use this checklist after deployment:
 
 ### ✅ Monitoring Layer
 - [ ] Alert configured for non-APIM traffic
-- [ ] Grafana dashboard shows APIM vs direct traffic
+- [ ] Azure Monitor workbook shows APIM vs direct traffic
 - [ ] Weekly review process established
 
 ---
@@ -366,21 +339,16 @@ except Exception as e:
 
 **Cause**: App identity doesn't have access to APIM.
 
-**Fix**: Grant the app "API Management Service Reader" role:
-
-```bash
-az role assignment create \
-  --assignee YOUR_APP_IDENTITY \
-  --role "API Management Service Reader" \
-  --scope /subscriptions/YOUR_SUB/resourceGroups/rg-ai/providers/Microsoft.ApiManagement/service/your-company-ai
-```
+**Fix**: Client applications authenticate with an APIM subscription key, not an
+Azure control-plane role. Declare the subscription under the appropriate product
+in `infrastructure/bicep/apim-gateway.bicep`, then run `azd provision`.
 
 ### Issue: Developers Complain About "Too Restrictive"
 
 **Response**: This is intentional! Show them:
-1. APIM is faster (caching)
-2. APIM prevents their quota from being exceeded
-3. APIM logs all their requests for debugging
+1. APIM enforces per-subscription quotas
+2. APIM keeps Foundry credentials away from clients
+3. APIM logs requests for operations and troubleshooting
 4. They can still call any model, just through the gateway
 
 ---
@@ -388,6 +356,5 @@ az role assignment create \
 ## References
 
 - [APIM Gateway Setup](./setup-apim-gateway.md)
-- [Token Quota Policy](../../policies/apim/token-quota-by-department.xml)
-- [Circuit Breaker Policy](../../policies/apim/circuit-breaker-multi-region.xml)
+- [APIM gateway infrastructure](../../infrastructure/bicep/apim-gateway.bicep)
 - [Developer Quickstart](../developer-quickstart.md)

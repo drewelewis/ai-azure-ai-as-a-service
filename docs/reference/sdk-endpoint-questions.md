@@ -149,7 +149,6 @@ Azure AI Foundry
 
 **If SDK bypasses endpoint parameter for some operations:**
 - ❌ Token quotas not enforced
-- ❌ Semantic caching not applied
 - ❌ Circuit breakers won't trigger
 - ❌ Audit logs incomplete
 - ❌ Cost attribution wrong
@@ -199,8 +198,8 @@ mitmproxy --port 8080
 export HTTPS_PROXY=http://localhost:8080
 export HTTP_PROXY=http://localhost:8080
 
-# Run your agent code
-python examples/python/6-foundry-agent-via-apim.py
+# Run your application test command
+python your_agent_test.py
 
 # Watch mitmproxy output:
 # ✅ ALL requests should go to: your-company-ai.azure-api.net
@@ -209,15 +208,7 @@ python examples/python/6-foundry-agent-via-apim.py
 
 **If you see direct azureml.ms requests → SDK is bypassing APIM!**
 
-### 2. Run Mock Test
-
-```bash
-python load_tests/test-sdk-endpoint-routing.py
-```
-
-This test patches HTTP libraries to capture all outgoing requests.
-
-### 3. Review SDK Source Code
+### 2. Review SDK Source Code
 
 Follow: [sdk-source-code-investigation.md](./sdk-source-code-investigation.md)
 
@@ -246,7 +237,6 @@ We are implementing an enterprise AI governance platform using Azure API Managem
 as a gateway for Azure AI Foundry projects. Our architecture requires ALL SDK 
 operations to route through APIM for:
 - Token quota enforcement
-- Semantic caching
 - Audit logging
 - Cost control
 
@@ -324,19 +314,17 @@ publicNetworkAccess: 'Disabled'
 
 ---
 
-## Files Created for You
+## Supporting References
 
-1. **load_tests/test-sdk-endpoint-routing.py** - HTTP capture test
-2. **docs/reference/sdk-endpoint-verification.md** - Complete risk analysis
-3. **docs/reference/sdk-source-code-investigation.md** - Source code review guide
-4. **This file** - Direct answers to your questions
+1. **docs/reference/sdk-endpoint-verification.md** - Complete risk analysis
+2. **docs/reference/sdk-source-code-investigation.md** - Source code review guide
+3. **This file** - Direct answers to your questions
 
 ## Next Steps
 
 1. Read [sdk-endpoint-verification.md](./sdk-endpoint-verification.md) for full analysis
-2. Run the traffic capture test
+2. Capture representative SDK traffic
 3. Review SDK source code
-4. Open Microsoft support ticket
-5. Report back findings
+4. Open a Microsoft support ticket for unresolved routing behavior
 
 **Bottom line:** Don't trust "This ensures ALL traffic goes through APIM" comments until you VERIFY it.

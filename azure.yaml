@@ -1,28 +1,18 @@
 # Azure Developer CLI (azd) configuration
 # Run: azd provision   → creates all Azure resources
-# Run: azd deploy      → deploys the automation Function App code
-# Run: azd up          → provision + deploy in one step
+# Run: azd up          → provisions the complete platform
 # Run: azd down        → tears down all provisioned resources
 
 name: ai-azure-ai-as-a-service
 
 # ---------------------------------------------------------------------------
-# Bicep infrastructure — four templates, each in its own resource group
-# so that teams can manage them independently and be torn down selectively.
-#
-# Provision order matters: apim-gateway and foundry-hub-project are
-# independent; event-grid-automation depends on apim-gateway outputs
-# (apimResourceId, applicationInsightsConnectionString); managed-grafana
-# depends on apim-gateway (appInsightsResourceId).
+# Bicep infrastructure for the governed APIM, Foundry, networking,
+# observability, and test-tooling platform.
 # ---------------------------------------------------------------------------
 infra:
   provider: bicep
   path: infrastructure/bicep
 
-# ---------------------------------------------------------------------------
-# Services — the automation Function App is the only deployable service.
-# The other Bicep templates are pure infrastructure with no application code.
-# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Hooks — run after provision to configure resources that have no ARM API
 # ---------------------------------------------------------------------------
@@ -32,7 +22,7 @@ hooks:
       interactive: true
       continueOnError: false
       # Prompt for any missing azd environment variables before provisioning.
-      # Already-set variables are skipped so re-runs are non-interactive.
+      # Every deployment confirms configuration; stored values become prompt defaults.
       run: |
         # -----------------------------------------------------------------------
         # Helper: prompt for a free-text value
@@ -43,19 +33,17 @@ hooks:
             [string]$EnvVar,
             [string]$Default = '',
             [bool]$Required = $false,
-            [string]$Description = ''
+            [string]$Description = '',
+            [bool]$UseStoredDefault = $true
           )
           $current = [System.Environment]::GetEnvironmentVariable($EnvVar)
-          if ($current) {
-            Write-Host "$Label already set — skipping."
-            return
-          }
+          $effectiveDefault = if ($UseStoredDefault -and $current) { $current } else { $Default }
           if ($Description) { Write-Host "  $Description" }
-          $prompt = if ($Default) { "  $Label [default: $Default]" } else { "  $Label" }
+          $prompt = if ($effectiveDefault) { "  $Label [default: $effectiveDefault]" } else { "  $Label" }
           $val = Read-Host $prompt
           if ([string]::IsNullOrWhiteSpace($val)) {
-            if ($Required -and -not $Default) { Write-Error "$Label is required. Exiting."; exit 1 }
-            $val = $Default
+            if ($Required -and -not $effectiveDefault) { Write-Error "$Label is required. Exiting."; exit 1 }
+            $val = $effectiveDefault
           }
           if ($val) { azd env set $EnvVar $val }
         }
@@ -66,15 +54,12 @@ hooks:
         function Prompt-Bool {
           param([string]$Label, [string]$EnvVar, [bool]$Default = $false, [string]$Description = '')
           $current = [System.Environment]::GetEnvironmentVariable($EnvVar)
-          if ($current) {
-            Write-Host "$Label already set to '$current' — skipping."
-            return
-          }
+          $effectiveDefault = if ($current) { $current -eq 'true' } else { $Default }
           if ($Description) { Write-Host "  $Description" }
-          $defaultStr = if ($Default) { 'Y/n' } else { 'y/N' }
+          $defaultStr = if ($effectiveDefault) { 'Y/n' } else { 'y/N' }
           $val = Read-Host "  $Label [$defaultStr]"
           if ([string]::IsNullOrWhiteSpace($val)) {
-            $chosen = $Default
+            $chosen = $effectiveDefault
           } else {
             $chosen = $val -match '^[Yy]'
           }
@@ -91,30 +76,69 @@ hooks:
           'southcentralus','southeastasia','swedencentral','switzerlandnorth',
           'uksouth','ukwest','westeurope','westus','westus2','westus3'
         ) | Sort-Object
+        $modelPortfolio = Get-Content 'infrastructure/model-portfolio.json' -Raw | ConvertFrom-Json
+
+        function Test-PortfolioRegion {
+          param([string]$Region)
+
+          $catalogOutput = az cognitiveservices model list --location $Region --output json --only-show-errors 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Could not query the Foundry model catalog for '$Region': $($catalogOutput -join ' ')"
+            return $false
+          }
+          $catalog = $catalogOutput | ConvertFrom-Json
+          $missing = @($modelPortfolio | Where-Object {
+            $requirement = $_
+            -not ($catalog | Where-Object {
+              $_.model.name -eq $requirement.modelName -and
+              $_.model.version -eq $requirement.version -and
+              $_.model.lifecycleStatus -notin @('Deprecating', 'Deprecated') -and
+              @($_.model.skus.name) -contains $requirement.skuName
+            } | Select-Object -First 1)
+          } | ForEach-Object { "$($_.modelName) $($_.version) [$($_.skuName)]" })
+          if ($missing.Count -gt 0) {
+            Write-Warning "Region '$Region' does not support the declared model portfolio. Missing: $($missing -join ', ')"
+            return $false
+          }
+          return $true
+        }
 
         function Prompt-Region {
           param([string]$Label, [string]$EnvVar, [string]$Default)
           $current = [System.Environment]::GetEnvironmentVariable($EnvVar)
+          $effectiveDefault = $Default
           if ($current) {
-            Write-Host "$Label region already set to '$current' — skipping."
-            return
+            if (Test-PortfolioRegion -Region $current) {
+              $effectiveDefault = $current
+            } else {
+              Write-Warning "$Label region '$current' must be replaced."
+            }
           }
-          Write-Host ""
-          Write-Host "  Select $Label region (default: $Default):"
-          for ($i = 0; $i -lt $allowedRegions.Count; $i++) {
-            Write-Host ("    {0,2}. {1}" -f ($i+1), $allowedRegions[$i])
-          }
-          $input = Read-Host "  Enter number or region name [default: $Default]"
-          if ([string]::IsNullOrWhiteSpace($input)) {
-            $chosen = $Default
-          } elseif ($input -match '^\d+$') {
-            $idx = [int]$input - 1
-            if ($idx -lt 0 -or $idx -ge $allowedRegions.Count) { Write-Error "Invalid selection."; exit 1 }
-            $chosen = $allowedRegions[$idx]
-          } else {
-            if ($allowedRegions -notcontains $input) { Write-Error "'$input' is not an allowed region."; exit 1 }
-            $chosen = $input
-          }
+          do {
+            $chosen = $null
+            Write-Host ""
+            Write-Host "  Select $Label region (default: $effectiveDefault):"
+            for ($i = 0; $i -lt $allowedRegions.Count; $i++) {
+              Write-Host ("    {0,2}. {1}" -f ($i+1), $allowedRegions[$i])
+            }
+            $input = Read-Host "  Enter number or region name [default: $effectiveDefault]"
+            if ([string]::IsNullOrWhiteSpace($input)) {
+              $chosen = $effectiveDefault
+            } elseif ($input -match '^\d+$') {
+              $idx = [int]$input - 1
+              if ($idx -lt 0 -or $idx -ge $allowedRegions.Count) {
+                Write-Warning 'Invalid selection.'
+                continue
+              }
+              $chosen = $allowedRegions[$idx]
+            } else {
+              if ($allowedRegions -notcontains $input) {
+                Write-Warning "'$input' is not an allowed region."
+                continue
+              }
+              $chosen = $input
+            }
+          } while (-not $chosen -or -not (Test-PortfolioRegion -Region $chosen))
           Write-Host "  Setting $EnvVar = $chosen"
           azd env set $EnvVar $chosen
         }
@@ -123,38 +147,52 @@ hooks:
         # Prompt for each variable
         # -----------------------------------------------------------------------
         Write-Host ""
-        Write-Host "=== Azure AI as a Service — first-time setup ==="
-        Write-Host "(Already-set variables will be skipped)"
+        Write-Host "=== Azure AI as a Service — deployment configuration ==="
+        Write-Host "(Stored values are defaults; confirm or replace each choice)"
         Write-Host ""
+
+        # Bind azd state to the same authenticated account the preflight and
+        # deployment commands use.
+        $account = az account show --query '{subscriptionId:id,tenantId:tenantId}' -o json 2>$null | ConvertFrom-Json
+        if (-not $account.subscriptionId -or -not $account.tenantId) {
+          Write-Error 'No active Azure CLI account was found. Authenticate before running azd up.'
+          exit 1
+        }
+        azd env set AZURE_SUBSCRIPTION_ID $account.subscriptionId
+        azd env set AZURE_TENANT_ID $account.tenantId
 
         # Regions
         Prompt-Region -Label 'Primary'   -EnvVar 'AZURE_LOCATION'           -Default 'eastus'
         Prompt-Region -Label 'Secondary' -EnvVar 'AZURE_SECONDARY_LOCATION' -Default 'westus'
 
-        # Resource group name — derive from env name to match Bicep naming: rg-contoso-ai-platform-<envName>
-        # Read AZURE_ENV_NAME from azd env values (more reliable than $env: during hook execution)
+        # Read AZURE_ENV_NAME from azd env values (more reliable than $env: during hook execution).
         $azdEnvName = (azd env get-values 2>$null | Select-String '^AZURE_ENV_NAME=').ToString() -replace '^AZURE_ENV_NAME="?([^"]+)"?$','$1'
         if (-not $azdEnvName) { $azdEnvName = $env:AZURE_ENV_NAME }
         if (-not $azdEnvName) { $azdEnvName = 'dev' }
         Write-Host ""
+        Prompt-Value -Label 'Company resource-name prefix' -EnvVar 'AZURE_COMPANY_PREFIX' `
+          -Default 'contoso' `
+          -Description 'Short lowercase prefix used in resource names.'
+        $companyPrefix = azd env get-value AZURE_COMPANY_PREFIX 2>$null
+
+        # Match the resource group name declared by main.bicep.
         Prompt-Value -Label 'Resource group name' -EnvVar 'AZURE_RESOURCE_GROUP' `
-          -Default "rg-contoso-ai-platform-$azdEnvName" `
+          -Default "rg-$companyPrefix-ai-platform-$azdEnvName" `
           -Description 'Name of the Azure resource group to create / deploy into.'
 
-        # Deploying user object ID — auto-detect if possible
-        if (-not [System.Environment]::GetEnvironmentVariable('AZURE_DEPLOYING_USER_OBJECT_ID')) {
-          $oid = az ad signed-in-user show --query id -o tsv 2>$null
-          if ($oid) {
-            Write-Host "  Auto-detected deploying user object ID: $oid"
-            azd env set AZURE_DEPLOYING_USER_OBJECT_ID $oid
-          } else {
-            Prompt-Value -Label 'Your Entra ID object ID (for storage access)' `
-              -EnvVar 'AZURE_DEPLOYING_USER_OBJECT_ID' -Required $true `
-              -Description 'Run: az ad signed-in-user show --query id -o tsv'
-          }
-        } else {
-          Write-Host "  Deploying user object ID already set — skipping."
-        }
+        Prompt-Value -Label 'Deployment profile' -EnvVar 'AZURE_DEPLOYMENT_PROFILE' `
+          -Default 'complete-development' `
+          -Description 'Use complete-development for test tooling or production to omit jumpbox and load testing.'
+        $deploymentProfile = azd env get-value AZURE_DEPLOYMENT_PROFILE 2>$null
+        $deployDevelopmentTools = $deploymentProfile -eq 'complete-development'
+
+        # Deploying user object ID — use the signed-in user as the initial default.
+        $currentOid = [System.Environment]::GetEnvironmentVariable('AZURE_DEPLOYING_USER_OBJECT_ID')
+        $detectedOid = az ad signed-in-user show --query id -o tsv 2>$null
+        $oidDefault = if ($currentOid) { $currentOid } else { $detectedOid }
+        Prompt-Value -Label 'Your Entra ID object ID (for storage access)' `
+          -EnvVar 'AZURE_DEPLOYING_USER_OBJECT_ID' -Default $oidDefault -Required $true `
+          -Description 'Defaults to the stored value or the currently signed-in user.'
 
         # Boolean feature flags
         Write-Host ""
@@ -162,71 +200,78 @@ hooks:
           -EnvVar 'AZURE_DEPLOY_RBAC' -Default $true `
           -Description 'Grants APIM managed identity Cognitive Services User on Foundry accounts.'
         Prompt-Bool -Label 'Deploy ACI jumpbox (VNet-internal dev/test container)' `
-          -EnvVar 'AZURE_DEPLOY_JUMPBOX' -Default $true
-        Prompt-Bool -Label 'Deploy automation Function App (Event Grid subscription handler)' `
-          -EnvVar 'AZURE_DEPLOY_FUNCTION_APP' -Default $true
-
-        # SSL cert for App Gateway WAF — auto-generated on first provision if blank.
-        # Override with a CA-signed cert for production.
+          -EnvVar 'AZURE_DEPLOY_JUMPBOX' -Default $deployDevelopmentTools
+        Prompt-Bool -Label 'Deploy Azure Load Testing' `
+          -EnvVar 'AZURE_DEPLOY_LOAD_TEST' -Default $deployDevelopmentTools `
+          -Description 'Required by complete-development; omitted by production.'
+        # SSL cert for App Gateway WAF — auto-generated by default.
         Write-Host ""
-        Prompt-Value -Label 'SSL cert Key Vault secret ID (blank = auto-generate self-signed)' `
-          -EnvVar 'AZURE_SSL_CERT_KV_SECRET_ID' `
-          -Description 'Format: https://<kv>.vault.azure.net/secrets/<name>/<version>. Leave blank to auto-generate.'
+        $certificateSetting = [System.Environment]::GetEnvironmentVariable('AZURE_SSL_CERT_KV_SECRET_ID')
+        $generateCertificateByDefault = -not $certificateSetting -or $certificateSetting -eq '__GENERATE__'
+        $certificateDefault = if ($generateCertificateByDefault) { 'Y/n' } else { 'y/N' }
+        $certificateChoice = Read-Host "  Generate a self-signed development certificate? [$certificateDefault]"
+        if ([string]::IsNullOrWhiteSpace($certificateChoice)) {
+          $generateCertificate = $generateCertificateByDefault
+        } else {
+          $generateCertificate = $certificateChoice -match '^[Yy]'
+        }
+        if ($generateCertificate) {
+          azd env set AZURE_SSL_CERT_KV_SECRET_ID '__GENERATE__'
+        } else {
+          $certificateSecretDefault = if ($certificateSetting -and $certificateSetting -ne '__GENERATE__') { $certificateSetting } else { '' }
+          Prompt-Value -Label 'SSL cert Key Vault secret ID' `
+            -EnvVar 'AZURE_SSL_CERT_KV_SECRET_ID' -Default $certificateSecretDefault -Required $true -UseStoredDefault $false `
+            -Description 'Format: https://<kv>.vault.azure.net/secrets/<name>/<version>.'
+        }
 
         Write-Host ""
         Write-Host "=== Configuration complete. Starting provisioning... ==="
         Write-Host ""
     - shell: pwsh
+      run: scripts/ensure-development-certificate.ps1
+      interactive: false
+      continueOnError: false
+    - shell: pwsh
       # Register resource providers that may not be enabled in new subscriptions.
       # az provider register is idempotent — safe to run every time.
       run: |
         $providers = @(
-          'Microsoft.LoadTestService'
-          'Microsoft.Batch'
           'Microsoft.ApiManagement'
+          'Microsoft.Authorization'
+          'Microsoft.Batch'
           'Microsoft.CognitiveServices'
+          'Microsoft.ContainerInstance'
+          'Microsoft.Insights'
+          'Microsoft.KeyVault'
+          'Microsoft.LoadTestService'
+          'Microsoft.ManagedIdentity'
+          'Microsoft.Network'
+          'Microsoft.OperationalInsights'
+          'Microsoft.Resources'
+          'Microsoft.Storage'
         )
         foreach ($p in $providers) {
           $state = az provider show --namespace $p --query registrationState -o tsv 2>$null
           if ($state -ne 'Registered') {
             Write-Host "Registering $p ..."
-            az provider register --namespace $p
+            az provider register --namespace $p --wait
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Failed to register required resource provider '$p'."
+              exit $LASTEXITCODE
+            }
           }
         }
+      interactive: false
+      continueOnError: false
+    - shell: pwsh
+      run: scripts/purge-soft-deleted-resources.ps1
+      interactive: false
+      continueOnError: false
+    - shell: pwsh
+      run: scripts/test-deployment-preflight.ps1
       interactive: false
       continueOnError: false
   postprovision:
-    - shell: pwsh
-      # Auto-create App Gateway self-signed cert on first provision, then re-provision
-      # so App Gateway deploys in the same azd up session.
-      # Guard: only runs when AZURE_SSL_CERT_KV_SECRET_ID was unset at start of this hook
-      # (prevents infinite loop on the re-provision pass).
-      run: |
-        $certLine = azd env get-values 2>$null | Select-String '^AZURE_SSL_CERT_KV_SECRET_ID='
-        $certId   = if ($certLine) { "$certLine" -replace '^AZURE_SSL_CERT_KV_SECRET_ID="?([^"]+)"?$','$1' } else { '' }
-        if (-not $certId) {
-          Write-Host ""
-          Write-Host "=== App Gateway WAF — first-run cert setup ==" -ForegroundColor Cyan
-          Write-Host "  Key Vault is now deployed. Creating self-signed cert..."
-          pwsh -File scripts/create-appgw-cert.ps1
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host ""
-            Write-Host "  Cert created. Re-provisioning to deploy App Gateway WAF..." -ForegroundColor Cyan
-            $provOut = azd provision 2>&1
-            # RoleAssignmentExists is non-fatal — the required RBAC is already in place.
-            if ($LASTEXITCODE -ne 0 -and ("$provOut" -notmatch 'RoleAssignmentExists')) {
-              Write-Error "azd provision (App Gateway) failed. Output:`n$provOut"
-            } else {
-              Write-Host "$provOut"
-            }
-          } else {
-            Write-Error "create-appgw-cert.ps1 failed (exit $LASTEXITCODE). App Gateway NOT deployed."
-          }
-        } else {
-          Write-Host "  App Gateway cert already configured — skipping cert setup." -ForegroundColor Green
-        }
-      interactive: false
-      continueOnError: false
     - shell: pwsh
       # Sync AZURE_RESOURCE_GROUP to the actual deployed resource group.
       # The Bicep names it rg-<prefix>-ai-platform-<envName>, tagged with azd-env-name.
@@ -241,61 +286,63 @@ hooks:
           }
         }
       interactive: false
-      continueOnError: true
+      continueOnError: false
     - shell: pwsh
-      # Grafana MSI → Monitoring Reader (subscription scope).
-      # Done here instead of Bicep to avoid conflicts with Azure-auto-created assignments.
-      # az role assignment create is idempotent when --name is fixed.
+      # Application Gateway operationalState is not Bicep-settable. Reconcile
+      # stopped gateways inside the azd lifecycle after infrastructure deploys.
       run: |
-        $sub  = az account show --query id -o tsv 2>$null
-        $grafanaName = "grafana-contoso-ai-$($env:AZURE_ENV_NAME ?? 'dev')"
-        $RG   = $env:AZURE_RESOURCE_GROUP
-        $principalId = az grafana show --name $grafanaName --resource-group $RG --query identity.principalId -o tsv 2>$null
-        if (-not $principalId) {
-          Write-Warning "Could not resolve Grafana MSI — skipping Monitoring Reader assignment."
-        } else {
-          $existing = az role assignment list --scope "/subscriptions/$sub" --role "Monitoring Reader" --assignee $principalId --query "[0].name" -o tsv 2>$null
-          if ($existing) {
-            Write-Host "Monitoring Reader already assigned to Grafana MSI ($existing) — skipping."
-          } else {
-            Write-Host "Assigning Monitoring Reader to Grafana MSI $principalId ..."
-            az role assignment create --scope "/subscriptions/$sub" --role "Monitoring Reader" --assignee $principalId --assignee-principal-type ServicePrincipal 2>$null
-          }
+        $resourceGroup = $env:AZURE_RESOURCE_GROUP
+        if ([string]::IsNullOrWhiteSpace($resourceGroup)) {
+          Write-Error 'AZURE_RESOURCE_GROUP is required to start Application Gateway.'
+          exit 1
         }
+
+        $gateways = @(az network application-gateway list `
+          --resource-group $resourceGroup `
+          --query '[].{name:name,provisioningState:provisioningState,operationalState:operationalState}' `
+          --output json `
+          --only-show-errors | ConvertFrom-Json)
+        if ($LASTEXITCODE -ne 0 -or $gateways.Count -ne 1) {
+          Write-Error "Expected one Application Gateway in resource group '$resourceGroup'; found $($gateways.Count)."
+          exit 1
+        }
+
+        $gateway = $gateways[0]
+        if ($gateway.provisioningState -ne 'Succeeded') {
+          Write-Error "Application Gateway '$($gateway.name)' provisioning state is '$($gateway.provisioningState)'."
+          exit 1
+        }
+
+        if ($gateway.operationalState -eq 'Stopped') {
+          Write-Host "Starting Application Gateway '$($gateway.name)'..."
+          az network application-gateway start `
+            --resource-group $resourceGroup `
+            --name $gateway.name `
+            --only-show-errors
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to start Application Gateway '$($gateway.name)'."
+            exit $LASTEXITCODE
+          }
+          $gateway.operationalState = az network application-gateway show `
+            --resource-group $resourceGroup `
+            --name $gateway.name `
+            --query operationalState `
+            --output tsv `
+            --only-show-errors
+        }
+
+        if ($gateway.operationalState -ne 'Running') {
+          Write-Error "Application Gateway '$($gateway.name)' operational state is '$($gateway.operationalState)'."
+          exit 1
+        }
+        Write-Host "Application Gateway '$($gateway.name)' is Running."
       interactive: false
-      continueOnError: true
+      continueOnError: false
     - shell: pwsh
       run: scripts/configure-load-test.ps1
       interactive: false
-      continueOnError: true   # don't fail the entire provision if ALT setup fails
+      continueOnError: false
     - shell: pwsh
-      # App Gateway operationalState is not a Bicep-settable property — ARM always
-      # resets it to Stopped after every re-deployment.  This hook starts it
-      # automatically after every azd provision so traffic flows immediately.
-      run: |
-        $agwName = "agw-contoso-ai-primary"
-        $RG      = $env:AZURE_RESOURCE_GROUP
-        if (-not $RG) { $RG = "rg-contoso-ai-platform-$($env:AZURE_ENV_NAME ?? 'dev')" }
-        $state = az network application-gateway show --name $agwName --resource-group $RG --query operationalState -o tsv 2>$null
-        if ($state -eq 'Running') {
-          Write-Host "App Gateway '$agwName' is already Running — nothing to do."
-        } else {
-          Write-Host "App Gateway '$agwName' is '$state' — starting it now..."
-          az network application-gateway start --name $agwName --resource-group $RG
-          Write-Host "App Gateway started."
-        }
+      run: scripts/validate-deployment.ps1
       interactive: false
-      continueOnError: true   # don't fail provision if gateway start times out
-
-# ---------------------------------------------------------------------------
-# Services — the automation Function App is the only deployable service.
-# The other Bicep templates are pure infrastructure with no application code.
-# ---------------------------------------------------------------------------
-services:
-  apim-subscription-handler:
-    project: automation/functions
-    language: py
-    host: function
-    # The Function App name is an output of event-grid-automation.bicep.
-    # azd resolves this automatically when the infra and service share the
-    # same resource group / deployment.
+      continueOnError: false

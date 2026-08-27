@@ -18,7 +18,7 @@
   Suite 1  [Bronze] — 3 threads, 5s think, 300s, max_tokens=1
     → ~30 RPM, ~60 TPM  — within Bronze 60 RPM / 500 TPM caps
   Suite 2  [Silver] — 3 threads, 5s think, 300s, max_tokens=1
-    → ~30 RPM, ~60 TPM  — well within Silver 300 RPM / 5000 TPM caps
+    → ~30 RPM, ~60 TPM  — well within Silver 120 RPM / 1000 TPM caps
 
   Combined TPM: ~120 TPM << 1K Foundry primary test cap — no failover expected.
 
@@ -37,8 +37,8 @@
   ============================================
     APIM_HOSTNAME  = agw-contoso-ai-primary.eastus.cloudapp.azure.com
     API_VERSION    = 2024-10-21
-    BRONZE_KEY     = <bronze-test subscription key>
-    SILVER_KEY     = <silver-test subscription key>
+    BRONZE_KEY     = <consumer-customer-service subscription key>
+    SILVER_KEY     = <consumer-account-opening subscription key>
 
   Additional uploaded files:
     appgw-system.properties  — trustStore=NONE (AppGW self-signed cert bypass)
@@ -265,7 +265,7 @@ if (region.contains("secondary")) {
 
       <!-- ================================================================= -->
       <!-- Suite 2: Silver — 3 threads, 5s think, 300s                      -->
-      <!-- ~30 RPM, ~60 TPM — well within Silver 300 RPM / 5000 TPM caps    -->
+      <!-- ~30 RPM, ~60 TPM — well within Silver 120 RPM / 1000 TPM caps    -->
       <!-- ================================================================= -->
       <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup"
                    testname="[Silver] WAF Smoke — gpt-4o-mini" enabled="true">

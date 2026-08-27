@@ -1,0 +1,57 @@
+[
+  {
+    "deploymentName": "gpt-4o-mini",
+    "format": "OpenAI",
+    "modelName": "gpt-4o",
+    "version": "2024-11-20",
+    "skuName": "Standard",
+    "primaryCapacity": 1,
+    "secondaryCapacity": 30,
+    "capability": "chat",
+    "tiers": ["bronze", "silver", "gold"]
+  },
+  {
+    "deploymentName": "gpt-4.1-mini",
+    "format": "OpenAI",
+    "modelName": "gpt-4.1-mini",
+    "version": "2025-04-14",
+    "skuName": "GlobalStandard",
+    "primaryCapacity": 10,
+    "secondaryCapacity": 10,
+    "capability": "chat",
+    "tiers": ["bronze", "silver", "gold"]
+  },
+  {
+    "deploymentName": "gpt-5-nano",
+    "format": "OpenAI",
+    "modelName": "gpt-5-nano",
+    "version": "2025-08-07",
+    "skuName": "GlobalStandard",
+    "primaryCapacity": 10,
+    "secondaryCapacity": 10,
+    "capability": "chat",
+    "tiers": ["silver", "gold"]
+  },
+  {
+    "deploymentName": "text-embedding-3-small",
+    "format": "OpenAI",
+    "modelName": "text-embedding-3-small",
+    "version": "1",
+    "skuName": "GlobalStandard",
+    "primaryCapacity": 120,
+    "secondaryCapacity": 120,
+    "capability": "embedding",
+    "tiers": ["bronze", "silver", "gold"]
+  },
+  {
+    "deploymentName": "text-embedding-3-large",
+    "format": "OpenAI",
+    "modelName": "text-embedding-3-large",
+    "version": "1",
+    "skuName": "GlobalStandard",
+    "primaryCapacity": 120,
+    "secondaryCapacity": 120,
+    "capability": "embedding",
+    "tiers": ["gold"]
+  }
+]

@@ -44,7 +44,6 @@ client = AIProjectClient(
 
 **Why this matters:** If any operation bypasses APIM:
 - Token quotas are NOT enforced
-- Semantic caching is NOT applied  
 - Circuit breakers won't trigger
 - Audit logs are incomplete
 - Cost attribution fails
@@ -100,8 +99,8 @@ mitmproxy --port 8080
 export HTTPS_PROXY=http://localhost:8080
 export HTTP_PROXY=http://localhost:8080
 
-# 4. Run your code
-python examples/python/6-foundry-agent-via-apim.py
+# 4. Run your application test command
+python your_agent_test.py
 
 # 5. Check mitmproxy output - you should see:
 #    ✅ ALL requests to: your-company-ai.azure-api.net
@@ -110,19 +109,11 @@ python examples/python/6-foundry-agent-via-apim.py
 
 **If you see `api.azureml.ms` requests, you have a bypass!**
 
-### Method 2: Mock Test (See test-sdk-endpoint-routing.py)
+### Method 2: Application-Level HTTP Tracing
 
-```python
-# Patches HTTP libraries to capture URLs
-with patch('requests.Session.request') as mock:
-    client = AIProjectClient(endpoint=apim_url, ...)
-    client.agents.create_agent(...)
-    
-    # Check all capture URLs
-    for call in mock.call_args_list:
-        url = call[0][1]  # Extract URL
-        assert apim_url in url, f"BYPASS DETECTED: {url}"
-```
+Enable the SDK's supported HTTP logging or instrument its transport to record
+destination hosts. Verify that requests use the APIM hostname and that direct
+Foundry hosts are unreachable.
 
 ### Method 3: SDK Source Code Review
 
@@ -257,7 +248,7 @@ resource apimBypassAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
 
 Before deploying to production:
 
-- [ ] Run `test-sdk-endpoint-routing.py`
+- [ ] Capture representative SDK traffic and verify destination hosts
 - [ ] Capture traffic with mitmproxy
 - [ ] Review SDK source code on GitHub
 - [ ] Test with `publicNetworkAccess: Disabled` on Foundry

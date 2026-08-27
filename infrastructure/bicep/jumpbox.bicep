@@ -12,7 +12,7 @@
 //
 // What this deploys:
 //   - Azure Container Instance group running mcr.microsoft.com/azure-cli:latest
-//   - Init: installs JMeter 5.6, openai Python package, creates /root/apim-tests/
+//   - Init: creates /root/apim-tests/ for ad hoc functional diagnostics
 //   - Subnet: snet-jumpbox (10.100.4.0/24) with Microsoft.ContainerInstance delegation
 //
 // Access the jumpbox after deployment:
@@ -22,12 +22,8 @@
 //   1. Add APIM private IP to hosts:
 //        APIM_IP=$(az apim show -g <rg> -n <apim-name> --query privateIpAddresses[0] -o tsv)
 //        echo "$APIM_IP  <apim-hostname>" >> /etc/hosts
-//   2. Run Python test:
-//        python3 /root/apim-tests/test.py
-//   3. Run JMeter load test:
-//        jmeter -n -t /root/apim-tests/apim-load-test.jmx \
-//          -JAPIM_HOSTNAME=apim.example.azure-api.net \
-//          -JBRONZE_KEY=<key> -JSILVER_KEY=<key>
+//   2. Use curl or an ad hoc Python script for functional diagnostics.
+//      Load tests run only through the Azure Load Testing resource.
 
 targetScope = 'resourceGroup'
 
@@ -60,10 +56,8 @@ var jumpboxSubnetId = '${vnetResourceId}/subnets/snet-jumpbox'
 //   - Alpine-based; already contains: Python 3, pip3, curl, az CLI
 //   - Pulled from Microsoft Container Registry via Azure backbone
 //
-// This command installs:
-//   - OpenJDK 17 JRE (Alpine package) + wget   — for JMeter
-//   - JMeter 5.6.3                              — load testing
-//   - openai Python package                    — API functional testing
+// No additional packages are installed because this subnet has no general
+// internet egress. The base image is sufficient for ad hoc diagnostics.
 // ---------------------------------------------------------------------------
 
 // The mcr.microsoft.com/azure-cli image is Alpine-based and already includes:

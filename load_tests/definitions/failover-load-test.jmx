@@ -19,7 +19,7 @@
   ===========
   Suite 1  [Silver Blast] — 20 threads, 3s think, 120s, max_tokens=20
     → ~400 RPM, ~8K TPM >> 1K primary cap → rapid Foundry 429 → APIM failover
-    Silver product cap: 300 RPM / 5K TPM (APIM-level).
+    Silver product cap: 120 RPM / 1K TPM (APIM-level).
     Primary Foundry is capped at 1K TPM for this test via configure-load-test.ps1.
     APIM transparent retry → client sees 200 throughout; X-Backend-Region-Used flips to secondary.
 
@@ -38,16 +38,17 @@
   ============================================
     APIM_HOSTNAME  = agw-contoso-ai-primary.eastus.cloudapp.azure.com
     API_VERSION    = 2024-10-21
-    SILVER_KEY     = <silver-test subscription key>
+    SILVER_KEY     = <consumer-account-opening subscription key>
 
   Additional uploaded files:
     appgw-system.properties  — trustStore=NONE (re-used for AppGW self-signed cert)
 
   POLICY REQUIREMENT
   ==================
-  policies/apim/failover-retry.xml must be active on openai-inference API.
+  The inline circuit-state policy in infrastructure/bicep/apim-gateway.bicep
+  must be active on the openai-inference API.
   Primary gpt-4o-mini PTU/standard deployment must be capped at 1K TPM.
-  Both set by configure-load-test.ps1 (run via azd postprovision hook).
+  Provision the declared configuration with azd before running this test.
 -->
 <jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
   <hashTree>

@@ -37,7 +37,7 @@ Azure AI Foundry Project
     ├─ Knowledge Base (Azure AI Search)
     └─ Evaluations
     ↓
-    Logs → Application Insights → Grafana
+    Logs → Application Insights → Azure Monitor Workbooks
 ```
 
 ## Why Foundry Instead of Direct Azure OpenAI?
@@ -129,7 +129,7 @@ subscription.
   bypassed (defence: APIM is the only network path; direct Foundry access is blocked
   by private endpoint + `disableLocalAuth: true`)
 - ❌ A noisy LOB can consume disproportionate TPM headroom under burst conditions,
-  degrading other LOBs (mitigation: `token-quota-by-department.xml`)
+  degrading other LOBs (mitigation: APIM product token limits)
 - ❌ No physical data boundary between LOBs — relies on APIM subscription key as the
   sole segregation control. Does not satisfy regulators who require physical separation
   (e.g., FedRAMP High, HIPAA BAA with strict data residency requirements)
@@ -218,15 +218,14 @@ conditions that would require migration to Option B.**
 Evaluate Option B individually for Gold LOBs based on their agent state and RAG
 data sensitivity requirements.
 
-## Integration with ServiceNow
+## Model and quota changes
 
 When developers request a new model or increase quota:
 
-1. Ticket filed in ServiceNow
-2. IT approves (via ADR-003 workflow)
-3. Model deployed to shared Foundry instance
-4. APIM endpoint automatically updated
-5. Developers get it without code changes
+1. The platform team reviews availability, quota, cost, and tier impact.
+2. The model portfolio or APIM product is updated in Bicep-backed configuration.
+3. `azd provision` reconciles Foundry and APIM.
+4. Developers use the existing endpoint without code changes.
 
 ## Consequences
 
@@ -247,7 +246,6 @@ When developers request a new model or increase quota:
 ## Related Decisions
 
 - [ADR-001: APIM as Gateway](adr-001-why-apim.md)
-- [ADR-003: ServiceNow Workflow](adr-003-servicenow-workflow.md)
 - [ADR-005: Identity Security Gaps — includes Gap 3 (per-LOB routing accepted tradeoff)](adr-005-identity-security-gaps.md)
 
 ---

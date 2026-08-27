@@ -1,0 +1,66 @@
+[
+  {
+    "id": "consumer-customer-service",
+    "displayName": "Consumer Banking - Customer Service Assistant",
+    "productId": "bronze",
+    "lineOfBusiness": "consumer-banking",
+    "useCase": "customer-service",
+    "enabled": true
+  },
+  {
+    "id": "consumer-account-opening",
+    "displayName": "Consumer Banking - Account Opening Assistant",
+    "productId": "silver",
+    "lineOfBusiness": "consumer-banking",
+    "useCase": "account-opening",
+    "enabled": true
+  },
+  {
+    "id": "commercial-relationship-manager",
+    "displayName": "Commercial Banking - Relationship Manager Assistant",
+    "productId": "bronze",
+    "lineOfBusiness": "commercial-banking",
+    "useCase": "relationship-manager",
+    "enabled": true
+  },
+  {
+    "id": "commercial-credit-memo",
+    "displayName": "Commercial Banking - Credit Memo Drafting and Review",
+    "productId": "silver",
+    "lineOfBusiness": "commercial-banking",
+    "useCase": "credit-memo",
+    "enabled": true
+  },
+  {
+    "id": "cib-deal-research",
+    "displayName": "Corporate and Investment Banking - Deal Research",
+    "productId": "gold",
+    "lineOfBusiness": "corporate-investment-banking",
+    "useCase": "deal-research",
+    "enabled": true
+  },
+  {
+    "id": "cib-due-diligence",
+    "displayName": "Corporate and Investment Banking - Due Diligence Review",
+    "productId": "gold",
+    "lineOfBusiness": "corporate-investment-banking",
+    "useCase": "due-diligence",
+    "enabled": true
+  },
+  {
+    "id": "wealth-advisor-copilot",
+    "displayName": "Wealth Management - Advisor Copilot",
+    "productId": "gold",
+    "lineOfBusiness": "wealth-management",
+    "useCase": "advisor-copilot",
+    "enabled": true
+  },
+  {
+    "id": "wealth-portfolio-commentary",
+    "displayName": "Wealth Management - Portfolio Commentary",
+    "productId": "silver",
+    "lineOfBusiness": "wealth-management",
+    "useCase": "portfolio-commentary",
+    "enabled": true
+  }
+]

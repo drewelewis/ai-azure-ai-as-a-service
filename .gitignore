@@ -17,14 +17,6 @@ __pycache__/
 # scripts/ local config — subscription IDs and resource names, never commit
 scripts/platform.env
 
-# LOB apps — belt-and-suspenders safety net so env files can never leak
-# even if a new LOB is added without its own .gitignore
-lobs/**/.env
-lobs/**/.venv/
-lobs/**/node_modules/
-lobs/**/__pycache__/
-lobs/**/*.pyc
-
 # Node
 node_modules/
 
@@ -37,10 +29,9 @@ __azurite_db_blob_extent*.json
 
 # ARM template output — compiled from Bicep, not source of truth
 infrastructure/bicep/*.json
-
-# JMeter runtime artifacts — logs and test-run output
-load_tests/scripts/jmeter/jmeter.log
-load_tests/scripts/jmeter/output/
+!infrastructure/bicep/main.parameters.json
+infrastructure/bicep/*.bicepparam
+infrastructure/bicep/.copilot-status.txt
 
 # Stale/working copies of test scripts (canonical versions are in load_tests/)
 tests/*.ps1

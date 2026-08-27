@@ -1,5 +1,0 @@
-azure-functions
-azure-identity
-azure-mgmt-applicationinsights
-azure-mgmt-monitor
-requests

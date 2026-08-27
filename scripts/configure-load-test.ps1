@@ -2,15 +2,15 @@
 #
 # azd postprovision hook — creates ALL Azure Load Testing test definitions.
 #
-# Runs automatically on every `azd provision`. No flags or gates — load tests
-# are mandatory. Can also be run manually: pwsh scripts/configure-load-test.ps1
+# Runs automatically for the complete-development profile. Can also be run
+# manually: pwsh scripts/configure-load-test.ps1
 #
 # Creates / updates all 5 load test definitions:
-#   apim-smoke-test         load_tests/definitions/apim-load-test.jmx          app-branch-advisor + app-aml-screening (direct APIM, no AppGW)
-#   appgw-failover-test     load_tests/definitions/failover-load-test.jmx      app-branch-advisor + app-aml-screening (circuit-breaker blast)
-#   appgw-smoke-test        load_tests/definitions/appgw-load-test.jmx         app-branch-advisor + app-aml-screening (WAF overhead measurement)
-#   multi-sub-failover-test load_tests/definitions/multi-sub-failover-test.jmx all 4 LOB subscriptions (concurrent failover)
-#   steady-state-test       load_tests/definitions/steady-state-test.jmx       all 4 LOB subscriptions (1-hour baseline)
+#   apim-smoke-test         load_tests/definitions/apim-load-test.jmx     consumer-customer-service + consumer-account-opening (direct APIM)
+#   appgw-failover-test     load_tests/definitions/failover-load-test.jmx consumer-account-opening (circuit-state routing)
+#   appgw-smoke-test        load_tests/definitions/appgw-load-test.jmx    consumer-customer-service + consumer-account-opening (WAF overhead)
+#   multi-sub-failover-test load_tests/definitions/multi-sub-failover-test.jmx all eight LOB use-case subscriptions
+#   steady-state-test       load_tests/definitions/steady-state-test.jmx       all eight LOB use-case subscriptions
 #
 # Prerequisites:
 #   azd provision   ← must run first (creates ALT resource, APIM, App Gateway)
@@ -18,10 +18,23 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Wrap so postprovision hook always exits 0 (best-effort step)
-trap {
-    Write-Warning "configure-load-test.ps1: non-fatal error — $($_.Exception.Message)"
-    Write-Warning "Re-run 'pwsh scripts/configure-load-test.ps1' manually after fixing the issue."
+$testDisplayNames = [ordered]@{
+    'apim-smoke-test' = 'APIM Smoke Test (direct VNet baseline)'
+    'appgw-failover-test' = 'AppGW Failover Blast - primary to secondary retry'
+    'appgw-smoke-test' = 'AppGW WAF v2 Smoke Test'
+    'multi-sub-failover-test' = 'Multi-Subscription Failover: Bronze/Silver/Gold'
+    'steady-state-test' = 'Steady State: All LOB Use Cases (1h)'
+}
+
+foreach ($testDisplayName in $testDisplayNames.GetEnumerator()) {
+    if ($testDisplayName.Value.Length -lt 2 -or $testDisplayName.Value.Length -gt 50) {
+        throw "Azure Load Testing display name for '$($testDisplayName.Key)' must contain 2-50 characters; received $($testDisplayName.Value.Length)."
+    }
+}
+
+$loadTestEnabled = azd env get-value AZURE_DEPLOY_LOAD_TEST 2>$null
+if ($loadTestEnabled -notmatch '^(?i:true|1|yes)$') {
+    Write-Host 'Azure Load Testing is disabled for the selected deployment profile; skipping test definition configuration.'
     exit 0
 }
 
@@ -34,7 +47,7 @@ if (-not $APIM_NAME) {
     Write-Error "No APIM instance found in '$RG'. Ensure 'azd provision' completed successfully."
 }
 if (-not $APPGW_FQDN) {
-    Write-Warning "APPGW_FQDN is empty — App Gateway may not be deployed yet. AppGW tests will target an unresolvable FQDN until App Gateway is provisioned."
+    Write-Error "APPGW_FQDN is empty. Azure Load Testing requires the declared Application Gateway endpoint."
 }
 
 # Internal APIM hostname — used only by apim-smoke-test (direct VNet baseline, no App Gateway).
@@ -47,8 +60,12 @@ if (-not $ALT_RESOURCE) {
     Write-Error "No Azure Load Testing resource found in '$RG'. Re-run 'azd provision' to create it."
 }
 
-# Subnet ID for VNet injection (so ALT agents run inside the VNet)
-$subnetId = az load show --name $ALT_RESOURCE -g $RG --query "properties.subnetId" -o tsv 2>$null
+# VNet injection is configured per test definition, not on the Load Testing resource.
+# main.bicep exports the dedicated subnet ID through the selected azd environment.
+$subnetId = _Resolve-AzdEnv 'LOAD_TEST_SUBNET_ID'
+if (-not $subnetId) {
+    throw 'LOAD_TEST_SUBNET_ID is missing. Re-run azd provision so private load tests cannot be created without VNet injection.'
+}
 
 $testsDir = Join-Path $PSScriptRoot '..' 'load_tests'
 $configDir = Join-Path $testsDir 'config'
@@ -73,7 +90,7 @@ if ($ext -ne 'load') {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Fetch all APIM subscription keys
+# 3. Fetch APIM LOB subscription keys
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "=== Fetching APIM subscription keys ===" -ForegroundColor Cyan
@@ -88,19 +105,35 @@ function Get-ApimKey([string]$subId) {
     return $key
 }
 
-# LOB subscriptions — all 5 test definitions use LOB-named subscription IDs
-$branchAdvisorKey      = Get-ApimKey 'app-branch-advisor'     # Bronze — BRONZE_KEY in generic load tests
-$amlScreeningKey       = Get-ApimKey 'app-aml-screening'      # Silver — SILVER_KEY in generic load tests
-$creditUnderwritingKey = Get-ApimKey 'app-credit-underwriting'
-$investmentPlatformKey = Get-ApimKey 'app-investment-platform'
+$consumerCustomerServiceKey = Get-ApimKey 'consumer-customer-service'
+$consumerAccountOpeningKey = Get-ApimKey 'consumer-account-opening'
+$commercialRelationshipManagerKey = Get-ApimKey 'commercial-relationship-manager'
+$commercialCreditMemoKey = Get-ApimKey 'commercial-credit-memo'
+$cibDealResearchKey = Get-ApimKey 'cib-deal-research'
+$cibDueDiligenceKey = Get-ApimKey 'cib-due-diligence'
+$wealthAdvisorCopilotKey = Get-ApimKey 'wealth-advisor-copilot'
+$wealthPortfolioCommentaryKey = Get-ApimKey 'wealth-portfolio-commentary'
 
-# Aliases used as BRONZE_KEY / SILVER_KEY env vars in apim-smoke-test, appgw-failover-test, appgw-smoke-test
-$bronzeTestKey = $branchAdvisorKey
-$silverTestKey = $amlScreeningKey
-Write-Host "  app-branch-advisor:      $(if ($branchAdvisorKey)      { $branchAdvisorKey.Substring(0,8)+'...' }      else { 'MISSING' })  (BRONZE_KEY)"
-Write-Host "  app-aml-screening:       $(if ($amlScreeningKey)       { $amlScreeningKey.Substring(0,8)+'...' }       else { 'MISSING' })  (SILVER_KEY)"
-Write-Host "  app-credit-underwriting: $(if ($creditUnderwritingKey) { $creditUnderwritingKey.Substring(0,8)+'...' } else { 'MISSING' })"
-Write-Host "  app-investment-platform: $(if ($investmentPlatformKey) { $investmentPlatformKey.Substring(0,8)+'...' } else { 'MISSING' })"
+$subscriptionKeys = [ordered]@{
+    CONSUMER_CUSTOMER_SERVICE_KEY = $consumerCustomerServiceKey
+    CONSUMER_ACCOUNT_OPENING_KEY = $consumerAccountOpeningKey
+    COMMERCIAL_RELATIONSHIP_MANAGER_KEY = $commercialRelationshipManagerKey
+    COMMERCIAL_CREDIT_MEMO_KEY = $commercialCreditMemoKey
+    CIB_DEAL_RESEARCH_KEY = $cibDealResearchKey
+    CIB_DUE_DILIGENCE_KEY = $cibDueDiligenceKey
+    WEALTH_ADVISOR_COPILOT_KEY = $wealthAdvisorCopilotKey
+    WEALTH_PORTFOLIO_COMMENTARY_KEY = $wealthPortfolioCommentaryKey
+}
+foreach ($entry in $subscriptionKeys.GetEnumerator()) {
+    if (-not $entry.Value) { throw "APIM subscription key '$($entry.Key)' is missing." }
+    Write-Host "  $($entry.Key): resolved"
+}
+
+# Focused plans keep their tier-oriented JMeter variable names but use real catalog subscriptions.
+$bronzeTestKey = $consumerCustomerServiceKey
+$silverTestKey = $consumerAccountOpeningKey
+$silverTestKey2 = $cibDealResearchKey
+$goldTestKey = $commercialCreditMemoKey
 
 # ---------------------------------------------------------------------------
 # 4. Helper — create or update one ALT test definition
@@ -108,10 +141,10 @@ Write-Host "  app-investment-platform: $(if ($investmentPlatformKey) { $investme
 function Register-AltTest {
     param(
         [string]   $TestId,
+        [ValidateLength(2, 50)]
         [string]   $DisplayName,
         [string]   $Description,
         [string]   $JmxPath,
-        [string[]] $EnvKvPairs,       # @("KEY=value", ...) — stored on the test definition
         [string[]] $AdditionalFiles,  # paths uploaded as ADDITIONAL_ARTIFACTS (system.properties, truststore)
         [string[]] $UserPropsPairs,   # @("KEY=value", ...) — written to user.properties and uploaded
         [string]   $TempFileName      # unique filename for temp user.properties in $TEMP
@@ -133,22 +166,15 @@ function Register-AltTest {
     $ErrorActionPreference = 'Stop'
 
     if ($exists -eq $TestId) {
-        Write-Host "  Test exists — updating JMX and env vars..."
+        Write-Host "  Test exists — updating JMX and private subnet..."
         az load test update `
             --load-test-resource $ALT_RESOURCE -g $RG `
             --test-id $TestId `
             --test-plan $JmxPath `
+            --subnet-id $subnetId `
+            --env "" `
             -o none
-
-        # Individual update calls per env var — avoids az load CLI preview bug
-        # where multiple --env flags combined with --test-plan drops all but the last two.
-        foreach ($kv in $EnvKvPairs) {
-            az load test update `
-                --load-test-resource $ALT_RESOURCE -g $RG `
-                --test-id $TestId `
-                --env $kv `
-                -o none
-        }
+        if ($LASTEXITCODE -ne 0) { throw "az load test update failed for '$TestId' (exit $LASTEXITCODE)" }
         Write-Host "  Updated." -ForegroundColor Green
     } else {
         Write-Host "  Creating test '$TestId'..."
@@ -162,12 +188,19 @@ function Register-AltTest {
             "--test-plan", $JmxPath,
             "-o", "none"
         )
-        foreach ($kv in $EnvKvPairs) { $createArgs += @("--env", $kv) }
-        if ($subnetId) { $createArgs += @("--subnet-id", $subnetId) }
+        $createArgs += @("--subnet-id", $subnetId)
         & az @createArgs
         if ($LASTEXITCODE -ne 0) { throw "az load test create failed for '$TestId' (exit $LASTEXITCODE)" }
         Write-Host "  Created '$TestId'." -ForegroundColor Green
     }
+
+    $configuredSubnetId = az load test show `
+        --load-test-resource $ALT_RESOURCE -g $RG `
+        --test-id $TestId --query subnetId -o tsv 2>$null
+    if (-not $configuredSubnetId -or -not $configuredSubnetId.Equals($subnetId, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Test '$TestId' is not VNet-injected into '$subnetId'; reported subnet is '$configuredSubnetId'."
+    }
+    Write-Host "  Private traffic subnet verified." -ForegroundColor Green
 
     # Upload static support files (system.properties, appgw-system.properties, truststore)
     foreach ($filePath in $AdditionalFiles) {
@@ -212,15 +245,9 @@ function Register-AltTest {
 # Provides the reference latency for App Gateway overhead calculations.
 Register-AltTest `
     -TestId       'apim-smoke-test' `
-    -DisplayName  'APIM Smoke Test (direct VNet baseline)' `
+    -DisplayName  $testDisplayNames['apim-smoke-test'] `
     -Description  'Bronze/Silver direct to APIM (no AppGW); latency baseline for WAF overhead calculations' `
     -JmxPath      (Join-Path $definitionsDir 'apim-load-test.jmx') `
-    -EnvKvPairs   @(
-        "APIM_HOSTNAME=$apimHostname",
-        "API_VERSION=2024-10-21",
-        "BRONZE_KEY=$bronzeTestKey",
-        "SILVER_KEY=$silverTestKey"
-    ) `
     -AdditionalFiles @(
         (Join-Path $configDir 'system.properties')
     ) `
@@ -238,14 +265,9 @@ Register-AltTest `
 # Client sees HTTP 200; X-Backend-Region-Used: secondary-failover in responses.
 Register-AltTest `
     -TestId       'appgw-failover-test' `
-    -DisplayName  'AppGW Failover Blast — primary→secondary retry' `
+    -DisplayName  $testDisplayNames['appgw-failover-test'] `
     -Description  'Saturates primary Foundry TPM cap; verifies APIM circuit-breaker failover to secondary' `
     -JmxPath      (Join-Path $definitionsDir 'failover-load-test.jmx') `
-    -EnvKvPairs   @(
-        "APIM_HOSTNAME=$APPGW_FQDN",
-        "API_VERSION=2024-10-21",
-        "SILVER_KEY=$silverTestKey"
-    ) `
     -AdditionalFiles @(
         (Join-Path $configDir 'system.properties'),
         (Join-Path $configDir 'appgw-system.properties')
@@ -275,15 +297,9 @@ $appgwExtraFiles.Add((Join-Path $configDir 'appgw-system.properties'))
 
 Register-AltTest `
     -TestId       'appgw-smoke-test' `
-    -DisplayName  'AppGW WAF v2 Smoke Test' `
+    -DisplayName  $testDisplayNames['appgw-smoke-test'] `
     -Description  'Measures latency through App Gateway WAF v2 vs direct APIM baseline (~10-30ms overhead expected)' `
     -JmxPath      (Join-Path $definitionsDir 'appgw-load-test.jmx') `
-    -EnvKvPairs   @(
-        "APIM_HOSTNAME=$APPGW_FQDN",
-        "API_VERSION=2024-10-21",
-        "BRONZE_KEY=$bronzeTestKey",
-        "SILVER_KEY=$silverTestKey"
-    ) `
     -AdditionalFiles $appgwExtraFiles.ToArray() `
     -UserPropsPairs @(
         "APIM_HOSTNAME=$APPGW_FQDN",
@@ -294,21 +310,11 @@ Register-AltTest `
     -TempFileName 'appgw-smoke-user.properties'
 
 # ── Test 4: multi-sub-failover-test ─────────────────────────────────────────
-# All four LOB subscriptions run sustained + blast suites simultaneously.
-# Proves one tenant's TPM burst does not black out other subscriptions.
 Register-AltTest `
     -TestId       'multi-sub-failover-test' `
-    -DisplayName  'Multi-Sub Failover: Bronze+Silver+Gold' `
-    -Description  'All LOB subs concurrent; triggers APIM circuit-breaker; proves per-tenant isolation' `
+    -DisplayName  $testDisplayNames['multi-sub-failover-test'] `
+    -Description  'Runs independent tier subscriptions concurrently to validate isolation and circuit-state routing' `
     -JmxPath      (Join-Path $definitionsDir 'multi-sub-failover-test.jmx') `
-    -EnvKvPairs   @(
-        "APIM_HOSTNAME=$APPGW_FQDN",
-        "API_VERSION=2024-10-21",
-        "BRONZE_KEY=$branchAdvisorKey",
-        "SILVER_KEY=$amlScreeningKey",
-        "SILVER_KEY_2=$creditUnderwritingKey",
-        "GOLD_KEY=$investmentPlatformKey"
-    ) `
     -AdditionalFiles @(
         (Join-Path $configDir 'system.properties'),
         (Join-Path $configDir 'appgw-system.properties')
@@ -316,30 +322,23 @@ Register-AltTest `
     -UserPropsPairs @(
         "APIM_HOSTNAME=$APPGW_FQDN",
         "API_VERSION=2024-10-21",
-        "BRONZE_KEY=$branchAdvisorKey",
-        "SILVER_KEY=$amlScreeningKey",
-        "SILVER_KEY_2=$creditUnderwritingKey",
-        "GOLD_KEY=$investmentPlatformKey"
+        "CONSUMER_CUSTOMER_SERVICE_KEY=$consumerCustomerServiceKey",
+        "COMMERCIAL_RELATIONSHIP_MANAGER_KEY=$commercialRelationshipManagerKey",
+        "CONSUMER_ACCOUNT_OPENING_KEY=$consumerAccountOpeningKey",
+        "CIB_DEAL_RESEARCH_KEY=$cibDealResearchKey",
+        "WEALTH_PORTFOLIO_COMMENTARY_KEY=$wealthPortfolioCommentaryKey",
+        "COMMERCIAL_CREDIT_MEMO_KEY=$commercialCreditMemoKey",
+        "CIB_DUE_DILIGENCE_KEY=$cibDueDiligenceKey",
+        "WEALTH_ADVISOR_COPILOT_KEY=$wealthAdvisorCopilotKey"
     ) `
     -TempFileName 'multi-sub-failover-user.properties'
 
 # ── Test 5: steady-state-test ────────────────────────────────────────────────
-# 1-hour baseline — all four LOB subscriptions at ~160 TPM combined.
-# No throttling or failover expected. Use to populate Grafana / App Insights dashboards.
-# Can run concurrently with multi-sub-failover-test (different ALT test ID).
 Register-AltTest `
     -TestId       'steady-state-test' `
-    -DisplayName  'Steady State: All Subscriptions (1h)' `
-    -Description  '4 LOB subs, ~160 TPM combined, 3600s; no failover expected; populates monitoring dashboards' `
+    -DisplayName  $testDisplayNames['steady-state-test'] `
+    -Description  'Runs all eight LOB use-case subscriptions below quota to populate per-subscription telemetry' `
     -JmxPath      (Join-Path $definitionsDir 'steady-state-test.jmx') `
-    -EnvKvPairs   @(
-        "APIM_HOSTNAME=$APPGW_FQDN",
-        "API_VERSION=2024-10-21",
-        "BRONZE_KEY=$branchAdvisorKey",
-        "SILVER_KEY=$amlScreeningKey",
-        "SILVER_KEY_2=$creditUnderwritingKey",
-        "GOLD_KEY=$investmentPlatformKey"
-    ) `
     -AdditionalFiles @(
         (Join-Path $configDir 'system.properties'),
         (Join-Path $configDir 'appgw-system.properties')
@@ -347,10 +346,14 @@ Register-AltTest `
     -UserPropsPairs @(
         "APIM_HOSTNAME=$APPGW_FQDN",
         "API_VERSION=2024-10-21",
-        "BRONZE_KEY=$branchAdvisorKey",
-        "SILVER_KEY=$amlScreeningKey",
-        "SILVER_KEY_2=$creditUnderwritingKey",
-        "GOLD_KEY=$investmentPlatformKey"
+        "CONSUMER_CUSTOMER_SERVICE_KEY=$consumerCustomerServiceKey",
+        "CONSUMER_ACCOUNT_OPENING_KEY=$consumerAccountOpeningKey",
+        "COMMERCIAL_RELATIONSHIP_MANAGER_KEY=$commercialRelationshipManagerKey",
+        "COMMERCIAL_CREDIT_MEMO_KEY=$commercialCreditMemoKey",
+        "CIB_DEAL_RESEARCH_KEY=$cibDealResearchKey",
+        "CIB_DUE_DILIGENCE_KEY=$cibDueDiligenceKey",
+        "WEALTH_PORTFOLIO_COMMENTARY_KEY=$wealthPortfolioCommentaryKey",
+        "WEALTH_ADVISOR_COPILOT_KEY=$wealthAdvisorCopilotKey"
     ) `
     -TempFileName 'steady-state-user.properties'
 
@@ -361,12 +364,12 @@ Write-Host ""
 Write-Host "All 5 load test definitions configured in '$ALT_RESOURCE'." -ForegroundColor Green
 Write-Host ""
 Write-Host "Run a test:"
-Write-Host "  pwsh scripts/run-load-test.ps1               # interactive launcher — pick from all 5 tests"
-Write-Host "  pwsh scripts/run-apim-smoke-test.ps1         # apim-smoke-test       (direct APIM baseline)"
-Write-Host "  pwsh scripts/run-appgw-failover-test.ps1     # appgw-failover-test   (circuit-breaker blast)"
-Write-Host "  pwsh scripts/run-appgw-smoke-test.ps1        # appgw-smoke-test      (WAF overhead ~5 min)"
-Write-Host "  pwsh scripts/run-multi-sub-failover-test.ps1 # multi-sub-failover-test  (~2 min)"
-Write-Host "  pwsh scripts/run-steady-state-test.ps1       # steady-state-test     (1 hour)"
+Write-Host "  pwsh load_tests/scripts/run_load_test.ps1 # interactive launcher"
+Write-Host "  pwsh load_tests/scripts/run_load_test.ps1 -TestId apim-smoke-test"
+Write-Host "  pwsh load_tests/scripts/run_load_test.ps1 -TestId appgw-failover-test"
+Write-Host "  pwsh load_tests/scripts/run_load_test.ps1 -TestId appgw-smoke-test"
+Write-Host "  pwsh load_tests/scripts/run_load_test.ps1 -TestId multi-sub-failover-test"
+Write-Host "  pwsh load_tests/scripts/run_load_test.ps1 -TestId steady-state-test"
 Write-Host ""
 Write-Host "Note: scripts/create-appgw-cert.ps1 generates load_tests/config/appgw-truststore.p12."
 Write-Host "      Run it once after provision, then re-run this script to upload the truststore to appgw-smoke-test."

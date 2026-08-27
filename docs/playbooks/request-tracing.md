@@ -77,9 +77,8 @@ Both rows share the same `OperationId`, giving a parent/child relationship that 
 | **APIM inbound span** | Application Insights | `AppRequests` | Full request metadata — HTTP method, URL, duration, HTTP status, `X-Correlation-Id` in `customDimensions` | `OperationId`, `customDimensions["Request-Header-X-Correlation-Id"]` |
 | **APIM → Foundry call** | Application Insights | `AppDependencies` | Backend call to Foundry — URL, duration, backend HTTP status, `X-Backend-Region-Used` | `OperationId` (same as parent `AppRequests` row) |
 | **APIM gateway log** | Log Analytics | `ApiManagementGatewayLogs` | Routing decision, response code, backend URL, subscription ID | `CorrelationId` column (populated from `context.RequestId`) |
-| **PCI DSS audit record** | Log Analytics (Event Hub sink) | Custom table or Event Hub stream | Subscription ID, LOB app identity (`appid`), **end-user identity (`user_oid`, `user_upn`)**, client IP, operation, product, department, timestamp | `pci-audit-request-id` = `context.RequestId` |
 
-> **Body logging is disabled.** APIM diagnostic settings have `body: { bytes: 0 }` on both request and response for PCI DSS Req 3.3. `BackendResponseBody` in `ApiManagementGatewayLogs` will be `null` for every row. This is intentional — for token counts, use the `azure-openai-emit-token-metric` policy output in Application Insights custom metrics rather than response body parsing.
+> **Body logging is disabled.** APIM diagnostic settings have `body: { bytes: 0 }` on both request and response to minimize collection of prompt and response content. `BackendResponseBody` in `ApiManagementGatewayLogs` will be `null` for every row. For token counts, use the `azure-openai-emit-token-metric` policy output in Application Insights custom metrics rather than response body parsing.
 
 ---
 
@@ -91,16 +90,15 @@ Correlation IDs (`X-Correlation-Id`, `OperationId`) identify a **request**. They
 
 | Signal | What it identifies | Where it lives | Trustworthy? |
 |---|---|---|---|
-| **APIM subscription key** (`Ocp-Apim-Subscription-Key`) | The LOB application or team | `ApiManagementGatewayLogs.SubscriptionId`, PCI audit `subscription_id` | Yes — APIM-validated |
-| **Entra JWT `appid`/`azp`** | The service principal of the calling LOB app | PCI audit `app_id` | Yes — cryptographically signed by Entra ID |
-| **Entra JWT `oid`** | The specific human user who triggered the action | PCI audit `user_oid` | Yes — cryptographically signed by Entra ID |
-| **Entra JWT `upn`/`preferred_username`** | The user's login name (e.g. `drew@contoso.com`) | PCI audit `user_upn` | Yes — cryptographically signed by Entra ID |
+| **APIM subscription key** (`Ocp-Apim-Subscription-Key`) | The LOB application or team | `ApiManagementGatewayLogs.SubscriptionId` | Yes — APIM-validated |
 
-The APIM subscription key gives you LOB-level accountability. The JWT `oid` and `upn` give you per-user accountability for AI actions — "which person clicked the button that triggered this model call?"
+The deployed platform provides LOB-level accountability through APIM subscription IDs. It does not currently extract end-user JWT claims into a custom audit stream.
 
 ### Why LOB apps can (and should) propagate user identity
 
-If the LOB app already requires a user login (Entra ID SSO), the user's JWT is already available upstream. The app should pass it to APIM as `Authorization: Bearer <token>`. APIM's `pci-dss-audit-logging.xml` policy then extracts `oid`, `upn`, and `appid` from the token and logs all three on every audit event — no custom code required on the LOB side.
+If the LOB app requires per-user auditability, preserve the Entra identity in the
+application's own audit system and correlate it with the gateway request ID. The
+platform does not persist `oid`, `upn`, or `appid` claims.
 
 ```
 User logs into LOB app
@@ -115,7 +113,7 @@ LOB app calls APIM
     X-Department-Id: <department>
         │
         ▼
-APIM PCI audit log records:
+Application audit log records:
     subscription_id = <APIM subscription>    ← LOB team identity
     app_id          = <JWT appid>            ← LOB application identity
     user_oid        = <JWT oid>              ← human user (Entra object ID)
@@ -131,7 +129,7 @@ Do **not** pass user identity as a plain custom header:
 X-User-Id: drew@contoso.com   ← spoofable, no cryptographic proof
 ```
 
-Anyone can send any value in a custom header. There is no signature to verify. This pattern fails PCI DSS Req 10.2.1.1 ("individual user access") because the "identity" is unverifiable. Use JWT claims only.
+Anyone can send any value in a custom header. There is no signature to verify, so the claimed identity is not trustworthy. Use validated JWT claims instead.
 
 ### Multi-agent and OBO scenarios
 
@@ -140,29 +138,7 @@ If the LOB app calls downstream services on behalf of the user (agent chains, to
 - **On-Behalf-Of (OBO) flow**: The app exchanges the user token for a new token scoped to the downstream service — the `oid` is preserved and the new token is still tied to the original user.
 - **Claims propagation**: Extract `oid` and `upn` at the APIM boundary, set them as trusted request variables, and pass them explicitly to downstream services via internal headers (only safe inside a private VNet where intermediate hops are trusted).
 
-For this platform's Silver and Gold tier use of the Agents API, the Foundry agent itself runs under APIM's managed identity — the Foundry call is always service-to-service. The user `oid`/`upn` are captured at the APIM boundary (in the PCI audit log) and do not need to be re-propagated to Foundry; they are already recorded against the same `request_id`.
-
-### Querying by user identity in the audit log
-
-```kql
-// All AI actions triggered by a specific user in the last 7 days
-// (query the Event Hub sink table — adjust table name to match your sink config)
-AzureDiagnostics
-| where TimeGenerated > ago(7d)
-| where properties_user_upn_s == "drew@contoso.com"
-| project
-    TimeGenerated,
-    properties_user_oid_s,
-    properties_user_upn_s,
-    properties_app_id_s,
-    properties_subscription_id_s,
-    properties_api_s,
-    properties_operation_s,
-    properties_product_s,
-    properties_http_status_code_s,
-    properties_request_id_s
-| order by TimeGenerated desc
-```
+For Silver and Gold Agents API traffic, the Foundry call runs under APIM's managed identity and remains service-to-service.
 
 ---
 
@@ -176,7 +152,6 @@ The APIM diagnostics resource in `apim-gateway.bicep` is configured to capture s
 | `Response-Header-X-Correlation-Id` | Same ID echoed back to caller | APIM frontend diagnostics — outbound response header |
 | `Response-Header-X-Backend-Region-Used` | `primary` or `secondary-failover` | Foundry response header, captured by APIM backend diagnostics |
 | `Response-Header-X-Tokens-Used` | Token count (if `azure-openai-emit-token-metric` is configured) | Foundry response, captured in APIM outbound |
-| `Response-Header-X-Cache` | Cache hit/miss status | APIM semantic cache policy outbound |
 
 ---
 
@@ -223,7 +198,6 @@ AppRequests
     ResultCode,
     customDimensions["Request-Header-X-Correlation-Id"],
     customDimensions["Response-Header-X-Backend-Region-Used"],
-    customDimensions["Response-Header-X-Cache"]
 ```
 
 Note the `OperationId` — you will use it in step 4.
@@ -244,36 +218,13 @@ AppDependencies
     Data             // operation type
 ```
 
-The `DurationMs` here is the Foundry-only inference time. The difference between `AppRequests.DurationMs` and `AppDependencies.DurationMs` is the APIM overhead (policy execution, auth token acquisition, semantic cache check).
+The `DurationMs` here is the Foundry-only inference time. The difference between `AppRequests.DurationMs` and `AppDependencies.DurationMs` is APIM overhead such as policy execution and authentication token acquisition.
 
 ```
 APIM overhead = AppRequests.DurationMs − AppDependencies.DurationMs
 ```
 
-### 5. Find the PCI DSS audit record
-
-```kql
-// Log Analytics — PCI audit log for this request
-// (table name depends on your Event Hub sink configuration — adjust as needed)
-AzureDiagnostics
-| where TimeGenerated > ago(2h)
-| where properties_pci_audit_request_id_s == "<context-request-id>"
-| project
-    TimeGenerated,
-    properties_pci_audit_sub_id_s,
-    properties_pci_audit_user_id_s,
-    properties_pci_audit_app_id_s,
-    properties_user_oid_s,           // end-user Entra object ID
-    properties_user_upn_s,           // end-user login name (e.g. drew@contoso.com)
-    properties_pci_audit_client_ip_s,
-    properties_pci_audit_product_s,
-    properties_pci_audit_department_s,
-    properties_pci_audit_operation_s
-```
-
-> Note: `pci-audit-request-id` = `context.RequestId` (APIM's internal GUID), not the `X-Correlation-Id`. To link the audit record to the App Gateway trace, join via the APIM gateway log's `CorrelationId` column first.
-
-### 6. Full cross-layer join (single query)
+### 5. Full cross-layer join (single query)
 
 ```kql
 // Cross-layer join: AppGW → APIM → Foundry for a single correlation ID
@@ -282,7 +233,6 @@ let apimSpan = AppRequests
     | where customDimensions["Request-Header-X-Correlation-Id"] == corrId
     | project OperationId, ApimDurationMs = DurationMs, ApimResultCode = ResultCode,
               BackendRegion = tostring(customDimensions["Response-Header-X-Backend-Region-Used"]),
-              CacheStatus   = tostring(customDimensions["Response-Header-X-Cache"]);
 let foundrySpan = AppDependencies
     | project OperationId, FoundryDurationMs = DurationMs, FoundryResultCode = ResultCode,
               FoundryTarget = Target;
@@ -305,7 +255,6 @@ apimSpan
     FoundryResultCode,
     AgwStatus,
     BackendRegion,
-    CacheStatus,
     WafRule
 ```
 
@@ -404,7 +353,7 @@ AppRequests
     P95_FoundryMs       = percentile(FoundryDurationMs, 95)
 ```
 
-Sustained APIM overhead > 200 ms at P95 warrants investigation — possible causes include semantic cache miss spikes, auth token acquisition latency, or policy execution time from the CHD masking policy.
+Sustained APIM overhead > 200 ms at P95 warrants investigation for authentication latency or expensive policy execution.
 
 ### WAF blocks with downstream APIM correlation
 
@@ -498,7 +447,7 @@ After any failed `azd provision`, verify all three. Do not re-enable them via po
 
 The parent/child W3C link is established by `httpCorrelationProtocol: 'W3C'` on the APIM diagnostics resource. If `AppDependencies` rows are absent for an `OperationId` that has an `AppRequests` row:
 
-- The Foundry call may have been served from the **semantic cache** — a cache hit returns a response directly from APIM without calling Foundry, so no `AppDependencies` row is emitted. Check `customDimensions["Response-Header-X-Cache"]` for `HIT`.
+- Confirm that dependency telemetry is enabled and that the request reached a Foundry backend.
 - The call may have been **rate-limited at Layer 2** (APIM rejected before forwarding). Check `BackendResponseCode == 0` in `ApiManagementGatewayLogs`.
 - The APIM diagnostics resource may have been reconfigured with a different `httpCorrelationProtocol`. Run `azd provision` to restore it.
 
@@ -517,14 +466,14 @@ Not a problem — the fallback is intentional. If production traffic is showing 
 
 ---
 
-## PCI DSS Constraints on Trace Data
+## Trace Data Constraints
 
 | Constraint | Detail |
 |---|---|
-| **Never enable body logging** | `verbosity: 'information'` on the APIM diagnostics resource is intentional. `'verbose'` logs request/response bodies which may contain cardholder data. This must not be changed in any environment within PCI scope. |
-| **Correlation IDs do not contain CHD** | `X-Correlation-Id` = `client_ip-client_port`. Neither field is a PCI DSS sensitive data element — IP addresses and port numbers are metadata, not cardholder data. Safe to log. |
-| **`pci-audit-request-id` is the audit anchor** | The PCI DSS audit log (`pci-dss-audit-logging.xml`) records `context.RequestId` as `pci-audit-request-id`. This is APIM's internal GUID — correlate it to `ApiManagementGatewayLogs.CorrelationId` to link audit records to gateway logs. |
-| **Audit log retention is 395 days** | Log Analytics workspace is configured for 395-day retention for PCI DSS Req 10.5.1. Do not reduce this. App Insights retention defaults to 90 days — sufficient for operational debugging but not the system of record for compliance. |
+| **Keep body logging disabled** | `verbosity: 'information'` and zero-byte body capture minimize collection of prompt and response content. |
+| **Correlation IDs contain metadata only** | `X-Correlation-Id` = `client_ip-client_port`; it does not contain prompt or response content. |
+| **Gateway correlation ID is the trace anchor** | `ApiManagementGatewayLogs.CorrelationId` and Application Insights operation data provide the deployed correlation surfaces. |
+| **Operational retention is 90 days** | Log Analytics and Application Insights retain enough history for operational investigation without the previous compliance-specific retention period. |
 
 ---
 
@@ -534,7 +483,6 @@ Not a problem — the fallback is intentional. If production traffic is showing 
 |---|---|
 | `infrastructure/bicep/waf-appgw.bicep` | App Gateway `inject-correlation-id` rewrite rule set |
 | `infrastructure/bicep/apim-gateway.bicep` | Global policy (`correlationId` variable), APIM logger, diagnostics resource (`httpCorrelationProtocol: W3C`) |
-| `policies/apim/pci-dss-audit-logging.xml` | PCI DSS audit record — fields logged per request |
 | `observability/workbooks/` | E2E Trace and Backend Routing Report workbook JSON |
 | `infrastructure/bicep/workbooks.bicep` | Workbook deployment — do not edit workbook JSON in portal |
 | `scripts/analyze-appinsights.ps1` | PowerShell wrapper with named App Insights queries including correlation ID coverage check (query 6) |

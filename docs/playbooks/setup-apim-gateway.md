@@ -13,8 +13,7 @@ After `azd provision`, your platform includes:
 
 ✅ APIM Premium (Internal VNet) with Bronze / Silver / Gold products  
 ✅ Token quota enforcement per department  
-✅ Semantic caching (reduces costs by ~20–40%)  
-✅ Audit logging to Log Analytics (395-day retention)  
+✅ Audit logging to Log Analytics (90-day retention)
 ✅ Circuit-breaker failover (East US → West US on 429/5xx)  
 ✅ Managed Identity auth to Foundry — no API keys distributed  
 
@@ -54,21 +53,18 @@ azd provision --no-prompt
 | Bicep file | What it provisions |
 |---|---|
 | `infrastructure/bicep/apim-gateway.bicep` | APIM instance, Bronze/Silver/Gold products, global policy, backends, logger |
-| `infrastructure/bicep/foundry-hub-project.bicep` | Foundry accounts (East + West), model deployments, AI Search |
+| `infrastructure/bicep/foundry-hub-project.bicep` | Foundry accounts (East + West) and mirrored model deployments |
 | `infrastructure/bicep/foundry-apim-rbac.bicep` | `Cognitive Services User` role for APIM MSI on both Foundry accounts |
 | `infrastructure/bicep/networking.bicep` | VNet, subnets, private endpoints, DNS zones |
-| `infrastructure/bicep/event-grid-automation.bicep` | Function App, Event Grid topic for subscription lifecycle events |
 
 ---
 
 ## Step 2: Grant Developer Access (Subscriptions)
 
-APIM subscriptions are created automatically via Event Grid when a developer onboards. The Function App at `automation/functions/apim-subscription-handler/` handles:
-- Creating the APIM subscription
-- Sending the developer their gateway URL and subscription key
-- Updating the ServiceNow CMDB
-
-For manual subscription creation, use the [APIM REST API](https://learn.microsoft.com/en-us/rest/api/apimanagement/subscription/create-or-update) or the `scripts/check-subscriptions.ps1` helper (read-only view) to inspect existing subscriptions.
+APIM products and the default development subscriptions are declared in
+`infrastructure/bicep/apim-gateway.bicep`. Add or change subscriptions in Bicep,
+then run `azd provision`. Use `scripts/check-subscriptions.ps1` for a read-only
+view of deployed subscriptions.
 
 ---
 
@@ -136,7 +132,7 @@ customEvents
 
 ## Step 5: Communicate to Developers
 
-When a developer is onboarded, the automation Function App sends a welcome email automatically. The template:
+When a developer is onboarded, provide these values through the organization's approved secret-delivery channel:
 
 ```
 Subject: AI Platform Access Granted
@@ -147,7 +143,7 @@ Your managed AI platform access is ready.
 
 Gateway URL:      https://<apim-name>.azure-api.net
 Subscription Key: [stored in Key Vault — see link below]
-App Insights:     [link to your LOB dashboard in Managed Grafana]
+Monitoring:       [link to your Azure Monitor workbook]
 
 Quick start:
   pip install azure-ai-projects azure-identity
@@ -173,8 +169,8 @@ Full guide: https://<internal-wiki>/ai-platform/developer-quickstart
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | 401 on all requests | Missing or wrong subscription key | Check key in Key Vault; re-provision with `azd provision` if missing |
-| 403 on a specific model | Model not allowed on your tier | Upgrade APIM product via ServiceNow |
-| 429 on inference | TPM quota hit | Check `token-quota-by-department.xml`; adjust capacity in Bicep |
+| 403 on a specific model | Model not allowed on your tier | Submit a reviewed Bicep change for the APIM product |
+| 429 on inference | TPM quota hit | Check the APIM product policy and model portfolio capacity in Bicep-backed configuration |
 | Foundry returns 503 | Private endpoint not resolved | Verify DNS zone link: `networking.bicep` → `azd provision` |
 | No App Insights data | Logger misconfigured | Verify `apim-gateway.bicep` logger resource → `azd provision` |
 
@@ -183,7 +179,6 @@ Full guide: https://<internal-wiki>/ai-platform/developer-quickstart
 ## Related
 
 - [Architecture Decision Record — Why APIM](../adr/adr-001-why-apim.md)
-- [Circuit Breaker Policy Guide](../../policies/apim/circuit-breaker-guide.md)
-- [Mock Responses for Load Testing](../../policies/apim/mock-responses.md)
-- [PCI DSS Configuration](pci-dss-configuration.md)
+- [APIM Gateway Bicep](../../infrastructure/bicep/apim-gateway.bicep)
+- [Load Test Guide](../../load_tests/readme.md)
 - [Developer Quick Start](../developer-quickstart.md)

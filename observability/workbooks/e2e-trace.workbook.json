@@ -87,7 +87,7 @@
     {
       "type": 1,
       "content": {
-        "json": "### Summary tiles\n\nAt-a-glance health for the selected time window. Scoped by the **Subscription** filter at the top — pick a single LOB (Branch Advisor · AML Screening · Credit Underwriting · Investment Platform) or leave at *All* for the full platform view. Only requests carrying an `X-Correlation-Id` header are counted (App Gateway sets this on every forwarded request; WAF-blocked requests are excluded).\n\n| Tile | What it shows | Healthy range |\n|---|---|---|\n| **Total Requests** | Count of APIM-correlated requests in the time range; sub-label = avg APIM latency | Steady or growing = traffic flowing normally |\n| **Avg APIM Latency** | Mean time APIM spent per request: policy execution (auth, quota, cache check) + Foundry round-trip | < 1 500 ms typical; < 3 500 ms during failover (secondary retry adds ~1 500–2 000 ms) |\n| **Avg Foundry Latency** | Mean model inference time at the Foundry backend, scoped to the same subscription filter | gpt-4o-mini: 400–1 500 ms · gpt-4o: 800–3 000 ms · o1 (Gold only): 2 000–8 000 ms |\n| **Failed Requests** | Requests where APIM returned a non-2xx to the client (after all retries exhausted) | 0 during normal operation; spikes indicate quota exhaustion on both primary + secondary |\n\n**Product tier limits in scope:** Bronze 500 TPM · Silver 5 000 TPM · Gold 5 500 TPM. Failover to West US secondary is transparent — failed requests tile only increments when *both* backends reject the request."
+        "json": "### Summary tiles\n\nAt-a-glance health for the selected time window. Use the **Subscription** filter to select a generic test client or leave it at *All*. Only requests carrying an `X-Correlation-Id` header are counted; WAF-blocked requests are excluded.\n\n| Tile | What it shows | Healthy range |\n|---|---|---|\n| **Total Requests** | Count of APIM-correlated requests in the time range; sub-label = avg APIM latency | Steady or growing = traffic flowing normally |\n| **Avg APIM Latency** | Mean policy execution, authentication, quota accounting, and Foundry round-trip time | < 1 500 ms typical; higher during secondary routing |\n| **Avg Foundry Latency** | Mean model inference time at the Foundry backend, scoped to the same subscription filter | Compare by selected model and region |\n| **Failed Requests** | Requests where APIM returned a non-2xx to the client | 0 during normal operation |\n\n**Product tier limits:** Bronze 500 TPM / 60 RPM · Silver 1 000 TPM / 120 RPM · Gold 2 000 TPM / 240 RPM."
       },
       "name": "section-summary-desc"
     },
@@ -130,7 +130,7 @@
     {
       "type": 1,
       "content": {
-        "json": "## Traffic Flow: Use Case → APIM → Foundry\n\nAggregate view of how requests move through the platform — which **APIM subscription keys** are generating traffic, how APIM routes them to each **Azure AI Foundry backend**, and the health of each backend.\n\n**How to read this section:**\n- Each coloured bar segment = one APIM subscription (e.g. `app-aml-screening`, `app-credit-underwriting`, `app-branch-advisor`)\n- Bar height = total requests in that 5-minute window across all subscriptions\n- Tall bars with many colours = sustained concurrent load from multiple LOBs — the scenario designed to saturate the primary Foundry TPM quota and trigger failover\n- The **routing table below** shows which Foundry backend (Primary East US or Secondary West US) each subscription's requests were sent to, and the error rate per route\n\n> **Tip:** A **Subscription** filter at the top narrows all traffic charts to a single LOB subscription. To drill into a specific request, use the **Correlation ID** filter that appears above the trace table — or click any row in the routing table to auto-populate it.\n\n> **⚠ What does \"APIM rejected (no backend reached)\" mean?** This row appears when APIM blocked the request *before* forwarding it to Foundry — the request never left the gateway. Common causes: **quota exceeded** (token or rate limit hit), **invalid or missing subscription key**, **policy rejection** (e.g. blocked content, IP restriction), or an **APIM internal error**. The giveaway is near-zero latency (< 5 ms) and a 100% error rate. Investigate in the Trace table below using the Correlation ID to find the exact APIM policy that fired."
+        "json": "## Traffic Flow: Subscription → APIM → Foundry\n\nAggregate view of which **APIM subscription keys** generate traffic, how APIM routes requests to each **Azure AI Foundry backend**, and the health of each backend.\n\n**How to read this section:**\n- Each coloured column is one APIM subscription\n- Columns are grouped side by side in each 5-minute window, not stacked\n- Height is that subscription's request count, so equal traffic remains visible\n- The routing table shows backend region and error rate per subscription\n\n> **Tip:** Use the **Subscription** filter to narrow the charts to one client, then use **Correlation ID** to inspect a request.\n\n> **What does \"APIM rejected (no backend reached)\" mean?** APIM blocked the request before forwarding it. Common causes include quota enforcement, an invalid subscription key, policy rejection, or a gateway error."
       },
       "name": "section-traffic-flow"
     },
@@ -138,9 +138,9 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "// Requests per APIM subscription over time — stacked bar\nAppRequests\n| where TimeGenerated {TimeRange}\n| extend sub = tostring(Properties[\"Subscription Name\"])\n| where isnotempty(sub)\n| where \"{SubscriptionName}\" == \"value:all\" or sub == \"{SubscriptionName}\"\n| summarize Requests = count() by bin(TimeGenerated, 5m), sub\n| sort by TimeGenerated asc",
+        "query": "// Requests per APIM subscription over time — clustered columns\nAppRequests\n| where TimeGenerated {TimeRange}\n| extend sub = tostring(Properties[\"Subscription Name\"])\n| where isnotempty(sub)\n| where \"{SubscriptionName}\" == \"value:all\" or sub == \"{SubscriptionName}\"\n| summarize Requests = count() by bin(TimeGenerated, 5m), sub\n| sort by TimeGenerated asc",
         "size": 0,
-        "title": "Requests per subscription over time (5-min buckets) — stacked by APIM subscription key",
+        "title": "Requests per subscription over time (5-min buckets)",
         "showQuery": true,
         "queryType": 0,
         "resourceType": "microsoft.operationalinsights/workspaces",
@@ -150,6 +150,9 @@
         "visualization": "barchart",
         "chartSettings": {
           "xAxis": "TimeGenerated",
+          "yAxis": [
+            "Requests"
+          ],
           "group": "sub",
           "createOtherGroup": 0,
           "showLegend": true,
@@ -186,9 +189,9 @@
               "formatOptions": {
                 "thresholdsOptions": "colors",
                 "thresholdsGrid": [
-                  { "operator": "==", "thresholdValue": "ai-bronze",  "representation": "#cd7f32", "text": "{0}" },
-                  { "operator": "==", "thresholdValue": "ai-silver",  "representation": "#c0c0c0", "text": "{0}" },
-                  { "operator": "==", "thresholdValue": "ai-gold",    "representation": "#ffd700", "text": "{0}" },
+                  { "operator": "==", "thresholdValue": "bronze",  "representation": "#cd7f32", "text": "{0}" },
+                  { "operator": "==", "thresholdValue": "silver",  "representation": "#c0c0c0", "text": "{0}" },
+                  { "operator": "==", "thresholdValue": "gold",    "representation": "#ffd700", "text": "{0}" },
                   { "operator": "Default", "thresholdValue": null,   "representation": "normal",  "text": "{0}" }
                 ]
               }
@@ -274,7 +277,7 @@
     {
       "type": 1,
       "content": {
-        "json": "## Per-Layer Latency Waterfall\n\nBreaks total end-to-end latency into three stacked components so you can see immediately which layer is the bottleneck.\n\n**How to read this chart:**\n- Each bar = one 5-minute bucket. The bar is divided into three coloured segments stacked from bottom to top\n- 🟢 **Green (Foundry inference)** — time the AI model spent generating the response. This dominates for large prompts or slow models\n- 🟠 **Orange (APIM overhead)** — APIM policy execution time after the Foundry response returns: logging, header injection, quota accounting. Should be < 50 ms\n- 🔵 **Blue (App GW overhead)** — WAF inspection and TLS termination overhead. Note: currently 0 because the AGW→APIM timing join is approximate; drill into the per-request waterfall below for accurate per-request AGW data\n\n> If the orange segment suddenly grows, check whether a policy (semantic cache miss, auth, quota) is adding latency. If green grows, the model is under load or a larger model was called."
+        "json": "## Per-Layer Latency Waterfall\n\nBreaks total end-to-end latency into three stacked components so you can identify the bottleneck.\n\n**How to read this chart:**\n- Each bar is one 5-minute bucket\n- 🟢 **Green (Foundry inference)** — model response generation time\n- 🟠 **Orange (APIM overhead)** — policy execution, authentication, logging, header injection, and quota accounting\n- 🔵 **Blue (App GW overhead)** — WAF inspection and TLS termination overhead\n\n> If orange grows, investigate APIM policy and authentication latency. If green grows, investigate model load, model choice, and backend region."
       },
       "name": "section-waterfall"
     },
@@ -778,19 +781,19 @@
                   },
                   {
                     "operator": "==",
-                    "thresholdValue": "ai-bronze",
+                    "thresholdValue": "bronze",
                     "representation": "#cd7f32",
                     "text": "{0}"
                   },
                   {
                     "operator": "==",
-                    "thresholdValue": "ai-silver",
+                    "thresholdValue": "silver",
                     "representation": "#c0c0c0",
                     "text": "{0}"
                   },
                   {
                     "operator": "==",
-                    "thresholdValue": "ai-gold",
+                    "thresholdValue": "gold",
                     "representation": "#ffd700",
                     "text": "{0}"
                   },
@@ -870,7 +873,7 @@
     {
       "type": 1,
       "content": {
-        "json": "## Usage & Efficiency\n\nToken consumption, semantic cache performance, and model usage breakdown for the selected time window and subscription filter.\n\n> **Note:** Cache hit rate and token quota panels require `X-Cache` and `X-Tokens-Used` response headers to be captured in APIM diagnostics (`apim-gateway.bicep` `frontend.response.headers`). Run `azd provision` once after that Bicep change to start populating data."
+        "json": "## Usage & Efficiency\n\nToken consumption and model usage breakdown for the selected time window and subscription filter.\n\n> **Note:** Token quota panels require the `X-Tokens-Used` response header captured by APIM diagnostics."
       },
       "name": "section-usage"
     },
@@ -915,33 +918,7 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "// Semantic cache hit rate per subscription\n// Requires X-Cache response header captured in APIM diagnostics (apim-gateway.bicep)\n// Cache policy sets X-Cache: HIT on served-from-cache responses, MISS on backend calls\nAppRequests\n| where TimeGenerated {TimeRange}\n| extend sub       = tostring(Properties[\"Subscription Name\"])\n| extend cacheStatus = tostring(Properties[\"Response-Header-X-Cache\"])\n| where isnotempty(sub) and isnotempty(cacheStatus)\n| where \"{SubscriptionName}\" == \"value:all\" or sub == \"{SubscriptionName}\"\n| summarize\n    Hits   = countif(cacheStatus == \"HIT\"),\n    Misses = countif(cacheStatus == \"MISS\"),\n    Total  = count()\n  by Subscription = sub\n| extend ['Hit Rate %'] = round(100.0 * Hits / Total, 1)\n| project Subscription, Total, ['Cache Hits'] = Hits, ['Cache Misses'] = Misses, ['Hit Rate %']\n| sort by Subscription asc",
-        "size": 1,
-        "title": "Semantic cache hit rate — per subscription",
-        "showQuery": true,
-        "queryType": 0,
-        "resourceType": "microsoft.operationalinsights/workspaces",
-        "crossComponentResources": [
-          "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-contoso-ai-platform-dev/providers/Microsoft.OperationalInsights/workspaces/law-contoso-ai-dev"
-        ],
-        "visualization": "table",
-        "gridSettings": {
-          "formatters": [
-            {
-              "columnMatch": "Hit Rate %",
-              "formatter": 8,
-              "formatOptions": { "palette": "greenRed", "min": 0, "max": 100 }
-            }
-          ]
-        }
-      },
-      "name": "cache-hit-table"
-    },
-    {
-      "type": 3,
-      "content": {
-        "version": "KqlItem/1.0",
-        "query": "// Token quota utilization — avg TPM consumed vs product cap\n// Source: AppRequests joined to AppDependencies — token counts come from\n// Properties[\"Response-Body-usage.total_tokens\"] written by APIM when\n// azure-openai-emit-token-metric policy emits the Foundry usage block.\n// Fallback: DurationMs-based proxy if token properties are absent.\n// Sub names match APIM subscription display names (context.Subscription.Name).\nlet caps = datatable(sub:string, TPMCap:long) [\n    \"app-branch-advisor\",      500,\n    \"app-aml-screening\",       5000,\n    \"app-credit-underwriting\", 5000,\n    \"Investment-Platform\",     5500\n];\nAppRequests\n| where TimeGenerated {TimeRange}\n| extend sub         = tostring(Properties[\"Subscription Name\"])\n| extend totalTokens = toint(Properties[\"Response-X-Tokens-Used\"])\n| where isnotempty(sub) and totalTokens > 0\n| where \"{SubscriptionName}\" == \"value:all\" or sub == \"{SubscriptionName}\"\n| summarize\n    TotalTokens = sum(totalTokens),\n    Requests    = count(),\n    WindowMins  = datetime_diff('minute', max(TimeGenerated), min(TimeGenerated))\n  by sub\n| extend AvgTPM = round(toreal(TotalTokens) / max_of(toreal(WindowMins), 1.0), 0)\n| join kind=leftouter caps on sub\n| extend ['% of Cap'] = iff(TPMCap > 0, round(100.0 * AvgTPM / toreal(TPMCap), 1), real(0))\n| project\n    Subscription    = sub,\n    Requests,\n    ['Total Tokens'] = TotalTokens,\n    ['Avg TPM']      = AvgTPM,\n    ['TPM Cap']      = TPMCap,\n    ['% of Cap']\n| sort by Subscription asc",
+        "query": "// Token quota utilization — avg TPM consumed vs product cap\n// Token counts come from the X-Tokens-Used response header emitted by APIM.\n// Names match the catalog-driven LOB subscription display names.\nlet caps = datatable(sub:string, TPMCap:long) [\n    \"Consumer Banking - Customer Service Assistant\", 500,\n    \"Commercial Banking - Relationship Manager Assistant\", 500,\n    \"Consumer Banking - Account Opening Assistant\", 1000,\n    \"Corporate and Investment Banking - Deal Research\", 1000,\n    \"Wealth Management - Portfolio Commentary\", 1000,\n    \"Commercial Banking - Credit Memo Drafting and Review\", 2000,\n    \"Corporate and Investment Banking - Due Diligence Review\", 2000,\n    \"Wealth Management - Advisor Copilot\", 2000\n];\nAppRequests\n| where TimeGenerated {TimeRange}\n| extend sub         = tostring(Properties[\"Subscription Name\"])\n| extend totalTokens = toint(Properties[\"Response-X-Tokens-Used\"])\n| where isnotempty(sub) and totalTokens > 0\n| where \"{SubscriptionName}\" == \"value:all\" or sub == \"{SubscriptionName}\"\n| summarize\n    TotalTokens = sum(totalTokens),\n    Requests    = count(),\n    WindowMins  = datetime_diff('minute', max(TimeGenerated), min(TimeGenerated))\n  by sub\n| extend AvgTPM = round(toreal(TotalTokens) / max_of(toreal(WindowMins), 1.0), 0)\n| join kind=leftouter caps on sub\n| extend ['% of Cap'] = iff(TPMCap > 0, round(100.0 * AvgTPM / toreal(TPMCap), 1), real(0))\n| project\n    Subscription    = sub,\n    Requests,\n    ['Total Tokens'] = TotalTokens,\n    ['Avg TPM']      = AvgTPM,\n    ['TPM Cap']      = TPMCap,\n    ['% of Cap']\n| sort by Subscription asc",
         "size": 1,
         "title": "Token quota utilization — avg TPM vs product cap",
         "showQuery": true,

@@ -1,17 +1,12 @@
 // Bicep: Application Gateway WAF v2 — Regional WAF Layer
 //
-// PCI DSS Req 6.4 / 6.5.4:
-//   "Automated technical solutions that protect web-facing apps from attacks."
-//   WAF must operate in Prevention mode (not Detection) with OWASP CRS 3.2+.
+// WAF operates in Prevention mode with OWASP CRS 3.2 and Bot Manager rules.
 //
 // Deploy one instance per region from main.bicep:
 //   - Primary   (East US): wafAppGwPrimary   — APIM East US internal IP
-//   - Secondary (West US): wafAppGwSecondary  — APIM West US internal IP
-//     (West US requires APIM Premium additionalLocations setting)
 //
 // Full inbound traffic path:
 //   Internet
-//     → Azure Front Door WAF (Standard Premium, global — see README PCI §13)
 //     → App Gateway WAF v2  (this resource, regional)
 //     → APIM Internal VNet  (Premium SKU, VNet-injected)
 //     → Azure AI Foundry    (private endpoint)
@@ -26,6 +21,9 @@ param location string
 @description('Application Gateway resource name')
 param appGwName string
 
+@description('Resource ID of the pre-provisioned user-assigned managed identity used to read the TLS certificate from Key Vault')
+param appGwIdentityResourceId string
+
 @description('VNet resource ID that APIM is injected into. App Gateway is deployed into this same VNet.')
 param vnetResourceId string
 
@@ -39,15 +37,15 @@ param apimInternalIpAddress string
 param apimGatewayHostname string
 
 @secure()
-@description('Key Vault secret ID for the SSL certificate PFX (full URI including version). PCI DSS Req 4.2.1: TLS 1.2+ enforced at listener.')
+@description('Key Vault secret ID for the SSL certificate PFX (full URI including version). TLS 1.2+ is enforced at the listener.')
 param sslCertKeyVaultSecretId string
 
-@description('Minimum App Gateway scale units (2+ for HA; PCI DSS Req 12.3.4)')
+@description('Minimum App Gateway scale units (2+ recommended for high availability)')
 @minValue(1)
 @maxValue(125)
 param capacity int = 2
 
-@description('Availability zones for zone-redundant deployment (PCI DSS Req 12.3.4)')
+@description('Availability zones for zone-redundant deployment')
 param availabilityZones array = ['1', '2', '3']
 
 param tags object = {}
@@ -63,27 +61,10 @@ param domainNameLabel string = toLower(appGwName)
 // ---------------------------------------------------------------------------
 
 var appGwSubnetId = '${vnetResourceId}/subnets/${appGwSubnetName}'
-
-// ---------------------------------------------------------------------------
-// Resource: User-Assigned Managed Identity
-// Required for App Gateway to read the SSL certificate from Key Vault.
-// PCI DSS Req 8.6: No static credentials — UAMI used for cert retrieval.
-// ---------------------------------------------------------------------------
-
-resource appGwIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
-  name: '${appGwName}-identity'
-  location: location
-  tags: tags
-}
-
-// ---------------------------------------------------------------------------
-// Note: Key Vault Certificate User RBAC for this identity is assigned in
-// main.bicep via kv-cert-rbac.bicep, which supports cross-resource-group KV.
-// ---------------------------------------------------------------------------
+var hasSslCertificate = !empty(sslCertKeyVaultSecretId)
 
 // ---------------------------------------------------------------------------
 // Resource: Public IP — zone-redundant Standard SKU
-// PCI DSS Req 12.3.4: Zone-redundant for HA.
 // Static allocation required for App Gateway v2.
 // ---------------------------------------------------------------------------
 
@@ -109,14 +90,10 @@ resource publicIp 'Microsoft.Network/publicIPAddresses@2023-05-01' = {
 
 // ---------------------------------------------------------------------------
 // Resource: WAF Policy
-// PCI DSS Req 6.4 / 6.5.4:
 //   - Prevention mode (not Detection) — blocks requests rather than just logs
 //   - OWASP CRS 3.2 — covers OWASP Top 10 including injection, XSS, SSRF
 //   - Microsoft Bot Manager 1.0 — blocks malicious bots and scrapers
 //   - Request body inspection enabled (catches payload-based attacks)
-//
-// NOTE: Do NOT set mode to 'Detection' — PCI DSS Req 6.4 requires blocking,
-// and a QSA will flag Detection-only WAFs as non-compliant.
 // ---------------------------------------------------------------------------
 
 resource wafPolicy 'Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies@2023-05-01' = {
@@ -126,7 +103,6 @@ resource wafPolicy 'Microsoft.Network/ApplicationGatewayWebApplicationFirewallPo
   properties: {
     policySettings: {
       state: 'Enabled'
-      // PCI DSS Req 6.4: MUST be Prevention. Detection mode does not satisfy Req 6.4.
       mode: 'Prevention'
       requestBodyCheck: true
       maxRequestBodySizeInKb: 128   // Large enough for AI prompts; increase if needed
@@ -136,7 +112,6 @@ resource wafPolicy 'Microsoft.Network/ApplicationGatewayWebApplicationFirewallPo
       managedRuleSets: [
         {
           ruleSetType: 'OWASP'
-          // PCI DSS ADR-004 Req 6.5.4: Must be CRS 3.2 or higher
           ruleSetVersion: '3.2'
         }
         {
@@ -181,12 +156,6 @@ resource wafPolicy 'Microsoft.Network/ApplicationGatewayWebApplicationFirewallPo
 //     → Backend Pool: APIM private IP
 //     → Backend HTTP Settings: HTTPS 443, SNI = apimGatewayHostname, 180s timeout
 //     → Health Probe: HTTPS GET /status-0123456789abcdef on apimGatewayHostname
-//
-// PCI DSS controls:
-//   Req 4.2.1  — TLS 1.2+ enforced via AppGwSslPolicy20220101; TLS 1.0/1.1 disabled
-//   Req 6.4    — WAF in Prevention mode with CRS 3.2 + Bot Manager
-//   Req 6.5.4  — OWASP CRS 3.2 + Prevention mode
-//   Req 12.3.4 — Zone-redundant WAF_v2 SKU, autoscale enabled
 // ---------------------------------------------------------------------------
 
 resource appGw 'Microsoft.Network/applicationGateways@2023-05-01' = {
@@ -197,7 +166,7 @@ resource appGw 'Microsoft.Network/applicationGateways@2023-05-01' = {
   identity: {
     type: 'UserAssigned'
     userAssignedIdentities: {
-      '${appGwIdentity.id}': {}
+      '${appGwIdentityResourceId}': {}
     }
   }
   properties: {
@@ -236,24 +205,22 @@ resource appGw 'Microsoft.Network/applicationGateways@2023-05-01' = {
         properties: { port: 443 }
       }
     ]
-    sslCertificates: [
+    sslCertificates: hasSslCertificate ? [
       {
         name: 'apim-ssl-cert'
         properties: {
           // Reference SSL cert from Key Vault via UAMI — no secret ever stored in App GW.
-          // PCI DSS Req 3.5: Cryptographic material protected in Key Vault HSM.
           // The UAMI above is granted Key Vault Certificate User before this resource deploys.
           keyVaultSecretId: sslCertKeyVaultSecretId
         }
       }
-    ]
+    ] : []
     sslPolicy: {
-      // PCI DSS Req 4.2.1: Enforce TLS 1.2+ at the App Gateway listener level.
       // AppGwSslPolicy20220101 disables TLS 1.0, TLS 1.1, and SSL 3.0.
       policyType: 'Predefined'
       policyName: 'AppGwSslPolicy20220101'
     }
-    httpListeners: [
+    httpListeners: hasSslCertificate ? [
       {
         name: 'appgw-https-listener'
         properties: {
@@ -271,13 +238,12 @@ resource appGw 'Microsoft.Network/applicationGateways@2023-05-01' = {
           requireServerNameIndication: false
         }
       }
-    ]
+    ] : []
     backendAddressPools: [
       {
         name: 'apim-backend-pool'
         properties: {
           // APIM's private IP within the VNet — never a public IP.
-          // PCI DSS Req 1.3: No direct path from internet to APIM.
           backendAddresses: [
             { ipAddress: apimInternalIpAddress }
           ]
@@ -322,7 +288,7 @@ resource appGw 'Microsoft.Network/applicationGateways@2023-05-01' = {
         }
       }
     ]
-    requestRoutingRules: [
+    requestRoutingRules: hasSslCertificate ? [
       {
         name: 'apim-routing-rule'
         properties: {
@@ -343,7 +309,7 @@ resource appGw 'Microsoft.Network/applicationGateways@2023-05-01' = {
           }
         }
       }
-    ]
+    ] : []
 
     // ---------------------------------------------------------------------------
     // Rewrite Rule Set: inject X-Correlation-Id for distributed tracing
@@ -404,7 +370,7 @@ resource appGw 'Microsoft.Network/applicationGateways@2023-05-01' = {
 output appGwPublicIp string = publicIp.properties.ipAddress
 output appGwResourceId string = appGw.id
 output appGwFqdn string = publicIp.properties.dnsSettings.fqdn
-output appGwIdentityPrincipalId string = appGwIdentity.properties.principalId
+output appGwIdentityResourceId string = appGwIdentityResourceId
 
 // ---------------------------------------------------------------------------
 // Resource: Diagnostic Settings — AppGW access, WAF firewall, and performance logs

@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     Grants "Cognitive Services User" role to the group on the Foundry project.
-    Used by ServiceNow automation after project provisioning.
+    Used by platform automation after project provisioning.
 
 .PARAMETER GroupId
     Entra ID group Object ID

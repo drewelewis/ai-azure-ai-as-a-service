@@ -1,159 +1,126 @@
-# Tests — JMeter Load Test Plans
+# Azure Load Testing Plans
 
 ## Overview
 
-All JMX plans in this directory are designed to run against the App Gateway public endpoint.
+This directory contains the JMeter-compatible test plans consumed by Azure Load
+Testing. JMX is the workload format used by the managed service; these files do
+not imply that a local JMeter engine is required or supported. Developers launch
+and monitor Azure-hosted test runs from their local workstation with PowerShell.
 
-The hostname is **environment-specific** — it is derived from a `uniqueString` of your subscription ID at provision time. Always use `$APPGW_FQDN` (set by `_resolve-env.ps1`) rather than a hardcoded hostname.
+All five tests are configured automatically for the `complete-development`
+profile during `azd provision`. The production profile does not deploy Azure Load
+Testing or configure test definitions.
 
-| File | What it tests | Keys needed |
+| Definition | Target | Subscription coverage |
 |---|---|---|
-| `definitions/apim-load-test.jmx` | Direct APIM (internal VNet — ALT only) | BRONZE_KEY, SILVER_KEY |
-| `definitions/appgw-load-test.jmx` | App Gateway → APIM → Foundry | BRONZE_KEY, SILVER_KEY |
-| `definitions/steady-state-test.jmx` | 1-hour steady state, all 4 LOBs | BRONZE_KEY, SILVER_KEY, SILVER_KEY_2, GOLD_KEY |
-| `definitions/failover-load-test.jmx` | Circuit-breaker failover | SILVER_KEY |
-| `definitions/multi-sub-failover-test.jmx` | Multi-subscription failover | BRONZE_KEY, SILVER_KEY |
+| `definitions/apim-load-test.jmx` | Internal APIM directly | Representative Bronze and Silver use cases |
+| `definitions/appgw-load-test.jmx` | Application Gateway to APIM | Representative Bronze and Silver use cases |
+| `definitions/failover-load-test.jmx` | Application Gateway to APIM circuit-state routing | Representative Silver use case |
+| `definitions/multi-sub-failover-test.jmx` | Application Gateway to APIM under shared pressure | All eight LOB use cases across Bronze, Silver, and Gold |
+| `definitions/steady-state-test.jmx` | Application Gateway to APIM for one hour | All eight LOB use cases across Bronze, Silver, and Gold |
 
-## Normal usage — Azure Load Testing (preferred)
+## Configuration Ownership
 
-The `load_tests/scripts/azure_load_test/run_azure_load_test*.ps1` scripts submit JMX files to the **Azure Load Testing** service (`lt-contoso-ai-dev1`), which runs JMeter in managed Azure agents. This is preferred because:
+- `infrastructure/bicep/load-testing.bicep` creates the Azure Load Testing
+  resource, managed identity, and VNet Network Contributor assignment.
+- `infrastructure/bicep/networking.bicep` creates the dedicated
+  `snet-loadtest` subnet and permits HTTPS from that subnet to internal APIM.
+- `infrastructure/bicep/main.bicep` exports `LOAD_TEST_SUBNET_ID`.
+- `definitions/*.jmx` defines workload behavior and assertions.
+- `scripts/configure-load-test.ps1` creates or updates each data-plane test,
+  uploads artifacts, assigns the subnet, and verifies the assignment.
+- `scripts/run_load_test.ps1` starts tests that are already configured, and
+  `scripts/invoke_load_test.ps1` contains the shared Azure run/poll logic.
 
-- Tests run from Azure-internal IPs (lower latency, no home ISP variability)
-- Subscription keys are fetched automatically via managed identity
-- Results land directly in Azure Monitor
+Azure Load Testing test definitions and uploaded JMX artifacts are data-plane
+objects rather than Bicep resources. Bicep therefore owns the Azure workspace,
+network, identity, and RBAC; the azd postprovision script reconciles the test
+definitions.
 
-```powershell
-pwsh scripts/run-load-test.ps1   # interactive menu
-```
+## Private Network Path
 
----
+Every test is assigned the Bicep-exported `LOAD_TEST_SUBNET_ID`. Azure Load
+Testing injects its test-engine NICs into `snet-loadtest`, where they use the
+VNet's private DNS links and routes.
 
-## Running JMeter locally
+The direct APIM smoke test resolves the internal APIM hostname from inside the
+VNet. The other four plans target Application Gateway, which forwards to internal
+APIM. APIM reaches both Foundry accounts over private endpoints and authenticates
+with its managed identity.
 
-### Prerequisites
+Configuration fails closed when the subnet output is missing. After creating or
+updating each test, `scripts/configure-load-test.ps1` reads the test's `subnetId`
+from Azure and fails if it does not match `LOAD_TEST_SUBNET_ID`.
 
-1. **JMeter 5.6+** — [download](https://jmeter.apache.org/download_jmeter.cgi), ensure `jmeter` is on your `PATH`
-2. **`az` CLI logged in** — verify with `az account show`
-3. **App Gateway running** — after dot-sourcing `_resolve-env.ps1`, `$APPGW_NAME` and `$APPGW_FQDN` are set. Verify:
-   ```powershell
-   . scripts/_resolve-env.ps1
-   az network application-gateway show -g $RG -n $APPGW_NAME --query operationalState -o tsv
-   ```
-   If it returns `Stopped`, start it:
-   ```powershell
-   az network application-gateway start -g $RG -n $APPGW_NAME
-   ```
-   Then confirm DNS resolves before running JMeter:
-   ```powershell
-   Resolve-DnsName $APPGW_FQDN
-   ```
+## Subscription Keys
 
-### Step 1 — Fetch APIM subscription keys
+The JMX files contain variable names, not credentials. During postprovision, the
+signed-in provisioning identity retrieves the APIM subscription keys through the
+Azure management API. The configuration script writes a temporary
+`user.properties` file for each test, uploads it as a USER_PROPERTIES artifact,
+and deletes the local temporary file.
 
-Dot-source the env resolver then call the APIM list-secrets API:
+Azure Load Testing receives APIM subscription keys only. Foundry keys are not
+used or distributed; APIM authenticates to Foundry with managed identity.
 
-```powershell
-cd c:\gitrepos\ai-azure-ai-as-a-service
+## Running Tests
 
-# The leading dot is PowerShell's dot-source operator — it runs the script in the
-# current scope so that $base, $t, $APIM_NAME, etc. survive in your terminal session.
-# Without it, variables set inside the script are discarded when it exits.
-. scripts/_resolve-env.ps1
+### Workstation prerequisites
 
-$BRONZE_KEY   = (az rest --method POST --uri "$base/subscriptions/app-branch-advisor/listSecrets?api-version=2022-08-01"   2>$null | ConvertFrom-Json).primaryKey
-$SILVER_KEY   = (az rest --method POST --uri "$base/subscriptions/app-aml-screening/listSecrets?api-version=2022-08-01"    2>$null | ConvertFrom-Json).primaryKey
-$SILVER_KEY_2 = (az rest --method POST --uri "$base/subscriptions/app-credit-underwriting/listSecrets?api-version=2022-08-01" 2>$null | ConvertFrom-Json).primaryKey
-$GOLD_KEY     = (az rest --method POST --uri "$base/subscriptions/app-investment-platform/listSecrets?api-version=2022-08-01" 2>$null | ConvertFrom-Json).primaryKey
-```
+- PowerShell 7 or later.
+- Azure CLI authenticated to the target tenant and subscription.
+- The Azure CLI `load` extension.
+- Azure Developer CLI with the target environment selected.
+- A completed `azd provision` for the `complete-development` profile.
 
-### Step 2 — TLS: trust the self-signed App Gateway certificate
-
-The App Gateway uses a self-signed cert. `config/system.properties` already tells JMeter to skip certificate validation (`trustStore=NONE`), which is the simplest option for local testing:
-
-```
-javax.net.ssl.trustStore=NONE
-https.use.cached.ssl.context=false
-```
-
-JMeter auto-reads `system.properties` from its working directory, so run all `jmeter` commands **from the `load_tests/` directory**, or pass the file explicitly with `-p load_tests/config/system.properties`.
-
-Alternatively, if you want full cert validation, use `config/appgw-system.properties` + `config/appgw-truststore.p12` (generated by `scripts/create-appgw-cert.ps1`):
+From the repository root, launch the interactive Azure test runner locally:
 
 ```powershell
-# Cert-validating variant (run from repo root)
-jmeter -n -t load_tests/definitions/steady-state-test.jmx `
-  -p load_tests/config/appgw-system.properties `
-  "-JAPIM_HOSTNAME=$APPGW_FQDN" ...
+.\_loadtest.bat
 ```
 
-### Step 3 — Run a test
+The root batch file forwards arguments to `scripts/run_load_test.ps1`. On
+non-Windows systems, invoke that PowerShell script directly.
 
-Run from the `load_tests/` directory so `system.properties` is picked up automatically.
+The launcher starts one of the five definitions already reconciled by
+`azd provision`. Before creating a run, it verifies that Application Gateway is
+healthy and running. If the gateway is stopped, the launcher runs the repository's
+`azd hooks run postprovision` lifecycle to start and validate it, then fails closed
+unless Azure reports `provisioningState=Succeeded` and `operationalState=Running`.
+The local process discovers the load-testing resource in the selected azd
+subscription, then starts and polls the run through its data-plane endpoint using
+a subscription-scoped token. This keeps polling stable if another process changes
+the global Azure CLI account context. Three consecutive polling failures stop the
+launcher with the underlying error instead of appearing as blank statuses until
+timeout. The launcher propagates a failed result through its exit code. All traffic
+generation occurs on VNet-injected Azure Load Testing engines. Automation can
+select a test through the same launcher with `-TestId`.
 
-**Steady-state (all 4 LOBs, 1 hour):**
-```powershell
-cd c:\gitrepos\ai-azure-ai-as-a-service\load_tests
-
-jmeter -n -t definitions/steady-state-test.jmx `
-  "-JAPIM_HOSTNAME=$APPGW_FQDN" `
-  "-JAPI_VERSION=2024-10-21" `
-  "-JBRONZE_KEY=$BRONZE_KEY" `
-  "-JSILVER_KEY=$SILVER_KEY" `
-  "-JSILVER_KEY_2=$SILVER_KEY_2" `
-  "-JGOLD_KEY=$GOLD_KEY" `
-  "-Jsummariser.interval=10" `
-  -l results.jtl -e -o html-report/
-```
-Open `load_tests/html-report/index.html` in a browser when complete.
-
-**App Gateway smoke (Bronze + Silver only):**
-```powershell
-jmeter -n -t definitions/appgw-load-test.jmx `
-  "-JAPIM_HOSTNAME=$APPGW_FQDN" `
-  "-JAPI_VERSION=2024-10-21" `
-  "-JBRONZE_KEY=$BRONZE_KEY" `
-  "-JSILVER_KEY=$SILVER_KEY" `
-  "-Jsummariser.interval=10" `
-  -l results.jtl -e -o html-report/
-```
-
-**Failover test (Silver only):**
-```powershell
-jmeter -n -t definitions/failover-load-test.jmx `
-  "-JAPIM_HOSTNAME=$APPGW_FQDN" `
-  "-JAPI_VERSION=2024-10-21" `
-  "-JSILVER_KEY=$SILVER_KEY" `
-  "-Jsummariser.interval=10" `
-  -l results.jtl -e -o html-report/
-```
-
-Progress is printed every 10 seconds:
-```
-summary +     8 in 00:00:10 =    0.8/s Avg:  1243 Min:   843 Max:  2105 Err:     0 (0.00%)
-```
-Columns: samples in window · window duration · req/s · avg latency ms · min · max · error count (rate).
-
-### Step 4 — View results
-
-Open `load_tests/html-report/index.html` in a browser — JMeter generates it automatically at the end of each run.
-
-> **Note:** Delete both `results.jtl` and `html-report/` before re-running; JMeter errors if either already exists.
+For example, launch the direct private-APIM smoke test without the menu:
 
 ```powershell
-Remove-Item -Force results.jtl -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force html-report -ErrorAction SilentlyContinue
+.\_loadtest.bat -TestId apim-smoke-test
 ```
 
----
+If test definitions or network settings change, run `azd provision` again before
+starting a test. Do not create or modify test definitions manually in the Azure
+portal because the next provision reconciles them from this repository.
 
-## Files in this directory
+## Files
 
-| File | Purpose |
+| Path | Purpose |
 |---|---|
-| `config/system.properties` | JMeter system props — trust-all TLS (auto-read from working dir) |
-| `config/appgw-system.properties` | JMeter system props — cert-validating TLS (uploaded to ALT alongside JMX) |
-| `config/appgw-truststore.p12` | PKCS12 truststore for App Gateway self-signed cert (password: `changeit`) |
-| `config/appgw-cert.cer` | App Gateway public cert (DER format) |
-| `requirements.txt` | Python deps for `simple.py` / `test-sdk-endpoint-routing.py` |
-| `simple.py` | Quick Python smoke test (single chat request via APIM) |
-| `test-sdk-endpoint-routing.py` | Validates SDK endpoint routing through APIM |
+| `definitions/*.jmx` | Five workload plans executed by Azure Load Testing |
+| `config/system.properties` | JMeter system properties uploaded with applicable plans |
+| `config/appgw-system.properties` | Application Gateway TLS properties uploaded with applicable plans |
+| `config/appgw-truststore.p12` | Generated truststore for the Bicep-provisioned Application Gateway certificate |
+| `config/appgw-cert.cer` | Exported Application Gateway public certificate |
+| `scripts/run_load_test.ps1` | Interactive and parameterized launcher for all managed test definitions |
+| `scripts/invoke_load_test.ps1` | Shared Azure test-run creation, polling, and result handling |
+
+## Adding a Test
+
+1. Add the JMX plan under `definitions/`.
+2. Add a `Register-AltTest` entry to `scripts/configure-load-test.ps1`.
+3. Add the test metadata and `ValidateSet` value to `scripts/run_load_test.ps1`.
+4. Run `azd provision` to reconcile and validate the test definition.
